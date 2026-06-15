@@ -1,0 +1,13 @@
+symbolPreset: nerd
+theme: 
+  dark: titanium
+setupVersion: 1
+modelRoles: 
+  default: llama.cpp/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+compaction: 
+  supersedeReads: false
+  dropUseless: false
+memory: 
+  backend: "off"
+providers: 
+  webSearch: kagi

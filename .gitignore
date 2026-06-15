@@ -1,0 +1,31 @@
+# Runtime SQLite state (agent/history/models DBs + WAL/SHM sidecars)
+*.db
+*.db-shm
+*.db-wal
+
+# Conversation & terminal session state
+/agent/sessions/
+/agent/terminal-sessions/
+
+# Logs
+/logs/
+
+# Hardware probe cache & runtime markers
+/gpu_cache.json
+/agent/last-changelog-version
+
+# Extension dependencies
+node_modules/
+# Claude Code local state (not part of the harness config)
+/.claude/
+
+# Stale skill docs for tools removed from the extension stack
+/agent/skills/tools/glob.md
+/agent/skills/tools/webfetch.md
+/agent/skills/tools/browser_click.md
+/agent/skills/tools/browser_extract.md
+/agent/skills/tools/browser_navigate.md
+/agent/skills/tools/browser_type.md
+/agent/skills/tools/evidence_add.md
+/agent/skills/tools/shell_session.md
+/agent/skills/protocols/cite_before_answer.md
