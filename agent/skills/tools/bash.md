@@ -3,7 +3,7 @@ name: bash-guidance
 type: tool-guidance
 target_tool: Bash
 priority: 10
-token_cost: 145
+token_cost: 270
 user-invocable: false
 ---
 ## Bash Tool
@@ -19,6 +19,14 @@ RULES:
   (`> /tmp/...` is fine); system package managers (apt/brew). To write a file use Write/Edit,
   not `>`. If blocked, the error lists the allowed alternatives — pick one, don't retry as-is.
 - Prefer the Read/Glob/Search tools over `cat`/`find`/`grep` when you just need file content.
+- SUMMARIZED OUTPUT: build/test runners get auto-condensed to a one-line summary plus a
+  `[raw output: artifact://N]` pointer — the verbose body (`=== RUN`, `--- PASS/FAIL`, `-v`
+  detail) is in the artifact, NOT in the summary. `go test: 1 packages ok, 2 no tests` means
+  2 packages had no test FILES (e.g. non-test packages); it does NOT mean your tests failed to
+  run or were not found. To inspect full results, `Read` the artifact (`{"path":"artifact://N"}`)
+  — do NOT re-run with different flags hoping to see more; the summarizer fires every time.
+- Compiled local binaries are NOT whitelisted (`./pkg.test` is blocked). Run tests via
+  `go test ./pkg/...`, not the built test binary.
 
 EXAMPLES:
 ```tool
