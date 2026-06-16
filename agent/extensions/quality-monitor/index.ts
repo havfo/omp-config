@@ -105,13 +105,20 @@ export default function (pi: ExtensionAPI) {
     }
 
     const correction = buildCorrectionMessage(verdict.reason);
-    const urgent = verdict.reason === "stalled_text_only" || verdict.reason === "narrating_not_acting";
     ctx.ui.notify(
-      `quality-monitor: ${verdict.reason} → queued ${urgent ? "steer" : "correction"}`,
+      `quality-monitor: ${verdict.reason} → queued steer`,
       "warning",
     );
-    // Route through the shared bus so we don't pile onto output-parser /
-    // syntax-guard corrections in the same turn (one message wins).
-    submitFollowUp(pi, "quality-monitor", FollowUpPriority.QUALITY, correction, urgent ? "steer" : "followUp");
+    // Deliver as `steer` (preempts the next turn), NOT `followUp`. A queued
+    // followUp is consumed only when the agent next idles for input; during an
+    // autonomous run that the model self-recovers from, it strands and drains
+    // after the task is done — surfacing a stale correction (e.g. "your previous
+    // response was empty") AFTER the final summary. The verdicts that reach here
+    // (empty_response, empty_tool_name, repeated_tool_call, malformed_args) all
+    // mean the current run is going wrong NOW, so preempting is correct and can
+    // never arrive late. (Same followUp-stranding hazard documented in
+    // skill-inject.) Route through the shared bus so we don't pile onto
+    // output-parser / syntax-guard corrections in the same turn (one wins).
+    submitFollowUp(pi, "quality-monitor", FollowUpPriority.QUALITY, correction, "steer");
   });
 }

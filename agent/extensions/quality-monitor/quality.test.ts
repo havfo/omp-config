@@ -10,10 +10,26 @@ describe("assessResponse", () => {
     const calls = [{ name: "Read", input: { file_path: "/a" } }];
     expect(assessResponse("", calls, [])).toEqual({ ok: true });
   });
-  it("detects empty response (no text, no calls)", () => {
+  it("does NOT flag a single transient empty turn (model self-recovers)", () => {
+    resetStallCounter();
+    // One empty turn is a hiccup — stay silent so a stale nudge can't strand to
+    // the end of an autonomous run the model recovers from on its own.
+    expect(assessResponse("", [], [])).toEqual({ ok: true });
+  });
+  it("detects empty response only once empty turns PERSIST", () => {
+    resetStallCounter();
+    expect(assessResponse("", [], [])).toEqual({ ok: true });
     expect(assessResponse("", [], [])).toEqual({
       ok: false, reason: "empty_response",
     });
+  });
+  it("resets the empty-turn streak when a productive turn intervenes", () => {
+    resetStallCounter();
+    expect(assessResponse("", [], [])).toEqual({ ok: true });
+    // Productive turn (text) clears the streak…
+    expect(assessResponse("here's progress", [], [])).toEqual({ ok: true });
+    // …so the next lone empty turn does NOT fire.
+    expect(assessResponse("", [], [])).toEqual({ ok: true });
   });
   it("does NOT flag empty when the turn carries reasoning (thinking-only turn)", () => {
     // Reasoning-model + streaming artifact: text block empty at inspection but
