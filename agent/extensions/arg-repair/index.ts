@@ -97,16 +97,58 @@ function relaxedJson(s: string): unknown | undefined {
   try { return JSON.parse(cleaned); } catch { return undefined; }
 }
 
-// Repair the two most common hashline op-syntax mistakes small models make in an
-// `edit` patch. A `DEL` header has NO colon and NO body; `SWAP` has both. Models
-// routinely write `DEL N.=M:` followed by `+body` when they mean to REPLACE —
-// that's a SWAP. We only touch DEL header lines; every other byte is preserved.
-//   - DEL header ending in `:` WITH `+body` after it → convert DEL→SWAP (replace)
-//   - DEL header ending in `:` WITHOUT body          → strip the stray colon
+// A hashline section header is `[PATH#TAG]` where TAG is 4 uppercase hex
+// (`computeFileHash` always emits uppercase; the tokenizer matches `[0-9A-F]{4}`
+// only). Models copying the header from `read`/`search` output mangle it in a
+// few mechanical ways: re-wrapping in extra brackets (`[[PATH#TAG]`), doubling
+// the closer (`[PATH#TAG]]`), dropping the closer (`[PATH#TAG`), or lowercasing
+// the tag (`#a2a9`). This matches any such header line and rebuilds the
+// canonical form. The greedy `.*` backtracks so the trailing `#XXXX` anchors as
+// the tag. Body rows (`+…`) never start with `[`, so they can't match.
+const HASHLINE_HEADER = /^\s*\[+\s*(.*?)\s*#([0-9A-Fa-f]{4})\s*\]*\s*$/;
+
+// Op lines whose leading keyword may have been lowercased. Each keyword is
+// matched case-insensitively but only when followed by its expected operand
+// shape (a line number, or a colon for HEAD/TAIL), so a lowercase keyword in a
+// bare body line like `del 3 rows` is far less likely to be clobbered.
+const HASHLINE_OP_NUMBERED =
+  /^(\s*)(SWAP\.BLK|DEL\.BLK|INS\.BLK\.POST|INS\.PRE|INS\.POST|SWAP|DEL)(\s+[1-9].*)$/i;
+const HASHLINE_OP_HEADTAIL = /^(\s*)(INS\.HEAD|INS\.TAIL)(\s*:.*)$/i;
+
+// Repair the most common hashline syntax mistakes small models make in an
+// `edit` patch. Three classes, applied per line:
+//   1. Header: normalize `[[PATH#TAG]` / `[PATH#TAG]]` / `[PATH#TAG` / `#a2a9`
+//      (lowercase tag) to the canonical `[PATH#TAG]` with an uppercase tag.
+//   2. Op keyword case: `swap`/`del`/`ins.post` → `SWAP`/`DEL`/`INS.POST`.
+//   3. DEL/SWAP confusion: a `DEL` has NO colon and NO body; `SWAP` has both.
+//      Models write `DEL N.=M:` + `+body` when they mean REPLACE — that's a SWAP.
+//        - DEL header ending in `:` WITH `+body` after it → convert to SWAP
+//        - DEL header ending in `:` WITHOUT body          → strip the stray colon
 export function repairHashlinePatch(patch: string): { patch: string; fixes: string[] } {
   const lines = patch.split("\n");
   const fixes: string[] = [];
   for (let i = 0; i < lines.length; i++) {
+    // 1. Header normalization (brackets + tag case).
+    const h = lines[i].match(HASHLINE_HEADER);
+    if (h) {
+      const canonical = `[${h[1]}#${h[2].toUpperCase()}]`;
+      if (canonical !== lines[i]) {
+        const bracketsChanged = !/^\[[^[\]]*\]$/.test(lines[i].trim());
+        if (bracketsChanged) fixes.push("header-normalize-brackets");
+        if (h[2] !== h[2].toUpperCase()) fixes.push("header-tag-uppercase");
+        lines[i] = canonical;
+      }
+      continue;
+    }
+
+    // 2. Op keyword case-normalization.
+    const op = lines[i].match(HASHLINE_OP_NUMBERED) ?? lines[i].match(HASHLINE_OP_HEADTAIL);
+    if (op && op[2] !== op[2].toUpperCase()) {
+      lines[i] = `${op[1]}${op[2].toUpperCase()}${op[3]}`;
+      fixes.push("op-keyword-uppercase");
+    }
+
+    // 3. DEL-with-body → SWAP, or strip a stray trailing colon from a bodyless DEL.
     const m = lines[i].match(/^(\s*)(DEL(?:\.BLK)?)(\s+\S.*?):\s*$/);
     if (!m) continue;
     const hasBody = /^\s*\+/.test(lines[i + 1] ?? "");
@@ -157,6 +199,15 @@ function stripHashlineTag(p: string): string {
   const m = p.match(/^(.*):([0-9a-fA-F]{4})$/);
   if (m && /[a-fA-F]/.test(m[2]) && !/^L/i.test(m[2])) return m[1];
   return p;
+}
+
+// Convert a hashline edit-range separator the model leaked into a READ path
+// selector. Read ranges are `path:START-END` (e.g. `server.go:130-160`), but
+// models conflate this with the edit-hunk range `130.=160` and read
+// `server.go:130.=160` → "file does not exist". A `digit.=digit` sequence is
+// unambiguous (real paths never contain it), so rewrite `.=` → `-`.
+function repairReadRangeSep(p: string): string {
+  return p.replace(/(\d)\.=(\d)/g, "$1-$2");
 }
 
 function dropUnknownEnabled(): boolean {
@@ -274,10 +325,15 @@ export function repairArgs(
   //     and sends the model into a tag-refresh re-read loop.
   if (spec.family === "file-read" && spec.pathArg && typeof input[spec.pathArg] === "string") {
     const before = input[spec.pathArg] as string;
-    const after = stripHashlineTag(before);
-    if (after !== before) {
-      input[spec.pathArg] = after;
+    const tagStripped = stripHashlineTag(before);
+    if (tagStripped !== before) {
+      input[spec.pathArg] = tagStripped;
       report.coerced.push(`${spec.pathArg}:hashline-tag`);
+    }
+    const rangeFixed = repairReadRangeSep(input[spec.pathArg] as string);
+    if (rangeFixed !== input[spec.pathArg]) {
+      input[spec.pathArg] = rangeFixed;
+      report.coerced.push(`${spec.pathArg}:read-range-sep`);
     }
   }
 

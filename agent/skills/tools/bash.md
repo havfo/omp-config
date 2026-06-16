@@ -3,27 +3,25 @@ name: bash-guidance
 type: tool-guidance
 target_tool: Bash
 priority: 10
-token_cost: 120
+token_cost: 145
 user-invocable: false
 ---
 ## Bash Tool
-Execute a shell command and return stdout+stderr.
+Run a shell command; returns combined stdout+stderr.
 
-REQUIRED: command (shell command string)
-OPTIONAL: timeout (seconds, default 30 - use 120-300 for installs/builds)
+REQUIRED: command    OPTIONAL: timeout (seconds; use 120-300 for installs/builds)
 
 RULES:
-- Stateless: each call starts fresh (cd does not persist)
-- Use absolute paths or chain with && (e.g. "cd /path && make")
-- Use timeout=120 for: pip install, npm install, builds, downloads
-- Returns combined stdout and stderr
+- Stateless: `cd` does not persist. Use absolute paths or chain `cd /path && make`.
+- Whitelisted (auto-approved): read-only inspection (ls, cat, find, grep/rg, git status/log,
+  go doc/list/env), and build/test/install runners (go/cargo/make/pytest/npm/pnpm/yarn/bun).
+- BLOCKED: command substitution `$(...)`/backticks; redirects to anything but a scratch path
+  (`> /tmp/...` is fine); system package managers (apt/brew). To write a file use Write/Edit,
+  not `>`. If blocked, the error lists the allowed alternatives — pick one, don't retry as-is.
+- Prefer the Read/Glob/Search tools over `cat`/`find`/`grep` when you just need file content.
 
-EXAMPLE:
+EXAMPLES:
 ```tool
-{"name": "Bash", "input": {"command": "ls -la /path/to/project/"}}
-```
-
-EXAMPLE with timeout:
-```tool
+{"name": "Bash", "input": {"command": "cd /repo && go test ./..."}}
 {"name": "Bash", "input": {"command": "pip install requests", "timeout": 120}}
 ```

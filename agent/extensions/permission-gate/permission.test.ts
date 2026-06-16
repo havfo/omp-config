@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isSafeBash } from "./index.ts";
+import { isSafeBash, buildBlockReason } from "./index.ts";
 
 describe("isSafeBash", () => {
   it("allows whitelisted read-only commands", () => {
@@ -86,5 +86,28 @@ describe("isSafeBash", () => {
     expect(isSafeBash("pytest > /tmp/out.txt")).toBe(true);
     expect(isSafeBash("echo hi >> /tmp/log.txt")).toBe(true);
     expect(isSafeBash("make 2>/dev/null")).toBe(true);
+  });
+
+  it("allows read-only go introspection subcommands", () => {
+    expect(isSafeBash("go doc syscall")).toBe(true);
+    expect(isSafeBash("go list ./...")).toBe(true);
+    expect(isSafeBash("go env GOPATH")).toBe(true);
+    expect(isSafeBash("go version")).toBe(true);
+  });
+});
+
+describe("buildBlockReason", () => {
+  it("lists whitelisted siblings instead of singling out a destructive one", () => {
+    // `go generate` is blocked; the hint must NOT single out `go get` as THE
+    // fix (the old `Try "go get" instead.` bug), but list the real siblings.
+    const reason = buildBlockReason("go generate ./...", "auto");
+    expect(reason).not.toMatch(/Try "go get" instead/);
+    expect(reason).toMatch(/Whitelisted "go" subcommands/);
+    expect(reason).toMatch(/go build/);
+    expect(reason).toMatch(/go doc/);
+  });
+  it("suggests the exact match when the subcommand is whitelisted at 2 tokens", () => {
+    // A typo'd flag on an allowed subcommand still resolves to that subcommand.
+    expect(buildBlockReason("git push origin main", "auto")).toMatch(/git/);
   });
 });

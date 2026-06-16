@@ -154,6 +154,13 @@ describe("repairArgs", () => {
     expect(r.coerced).not.toContain("path:hashline-tag");
   });
 
+  it("converts a hashline edit-range separator leaked into a read path", () => {
+    const input: any = { path: "internal/turn/server.go:130.=160" };
+    const r = repairArgs("read", input);
+    expect(input.path).toBe("internal/turn/server.go:130-160");
+    expect(r.coerced).toContain("path:read-range-sep");
+  });
+
   it("does NOT mistake an all-digit suffix for a tag", () => {
     // 4 digits with no hex letter is a plausible line number — leave it.
     const input: any = { path: "gcc.go:1234" };
@@ -188,6 +195,56 @@ describe("repairArgs", () => {
     const r = repairArgs("edit", input);
     expect(input.input).toBe(ok);
     expect(r.coerced.filter((c) => c.startsWith("input:"))).toEqual([]);
+  });
+
+  it("collapses a doubled leading bracket on a section header", () => {
+    const input: any = { input: "[[pkg/a/b.go#A2A9]\nSWAP 7.=14:\n+const x = 1" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe("[pkg/a/b.go#A2A9]\nSWAP 7.=14:\n+const x = 1");
+    expect(r.coerced).toContain("input:header-normalize-brackets");
+  });
+
+  it("collapses a doubled closing bracket on a section header", () => {
+    const input: any = { input: "[a.ts#0DB3]]\nSWAP 3.=3:\n+x" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe("[a.ts#0DB3]\nSWAP 3.=3:\n+x");
+    expect(r.coerced).toContain("input:header-normalize-brackets");
+  });
+
+  it("adds a missing closing bracket on a section header", () => {
+    const input: any = { input: "[a.ts#0DB3\nSWAP 3.=3:\n+x" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe("[a.ts#0DB3]\nSWAP 3.=3:\n+x");
+    expect(r.coerced).toContain("input:header-normalize-brackets");
+  });
+
+  it("uppercases a lowercase snapshot tag in the header", () => {
+    const input: any = { input: "[a.ts#0db3]\nSWAP 3.=3:\n+x" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe("[a.ts#0DB3]\nSWAP 3.=3:\n+x");
+    expect(r.coerced).toContain("input:header-tag-uppercase");
+  });
+
+  it("uppercases a lowercased op keyword", () => {
+    const input: any = { input: "[a.ts#0DB3]\nswap 3.=3:\n+x" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe("[a.ts#0DB3]\nSWAP 3.=3:\n+x");
+    expect(r.coerced).toContain("input:op-keyword-uppercase");
+  });
+
+  it("uppercases a lowercased dotted op keyword (ins.post)", () => {
+    const input: any = { input: "[a.ts#0DB3]\nins.post 14:\n+x" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toContain("INS.POST 14:");
+    expect(r.coerced).toContain("input:op-keyword-uppercase");
+  });
+
+  it("leaves a correct single-bracket header untouched", () => {
+    const ok = "[pkg/a/b.go#A2A9]\nSWAP 7.=14:\n+const x = 1";
+    const input: any = { input: ok };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe(ok);
+    expect(r.coerced.filter((c) => c.startsWith("input:header"))).toEqual([]);
   });
 
   it("ignores tools not in taxonomy", () => {

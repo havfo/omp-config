@@ -50,6 +50,22 @@ const PER_TOOL_HINTS: Record<string, Hint[]> = {
   ],
 };
 
+// Edit-family results that SUCCEED but change nothing — the model believes it
+// edited the file but its replacement equalled the existing lines, or it
+// anchored the wrong occurrence. These aren't tool errors (isError is false),
+// so they bypass the error path; coach them anyway to stop the no-op→ast_edit
+// flailing seen in practice.
+const NOOP_EDIT_TOOLS = new Set(["edit", "ast_edit"]);
+const NOOP_HINTS: Hint[] = [
+  { match: /produced no change|byte[- ]identical|no replacements made|no change(s)? (were )?made/i,
+    hint: "Hint: the call applied but changed nothing — your new text equals the existing lines, or you targeted the wrong occurrence. Re-Read the exact lines, confirm the replacement actually differs, and anchor by line number." },
+];
+
+export function pickNoopHint(errorText: string): string | undefined {
+  for (const h of NOOP_HINTS) if (h.match.test(errorText)) return h.hint;
+  return undefined;
+}
+
 export function pickHint(toolName: string, errorText: string): string | undefined {
   const t = toolName?.toLowerCase() ?? "";
   for (const h of PER_TOOL_HINTS[t] ?? []) if (h.match.test(errorText)) return h.hint;
@@ -76,9 +92,21 @@ export function clearLastFailedTool(): void { lastFailedTool.name = null; }
 
 export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event) => {
-    if (!(event as any).isError) return;
     const toolName = (event as any).toolName;
     const text = asText((event as any).content);
+
+    if (!(event as any).isError) {
+      // Successful no-op edit: coach without flagging a failure (so skill-inject
+      // doesn't refresh) and leave lastFailedTool untouched.
+      if (typeof toolName === "string" && NOOP_EDIT_TOOLS.has(toolName)) {
+        const noopHint = pickNoopHint(text);
+        if (noopHint) {
+          return { content: [{ type: "text" as const, text: text + "\n\n" + noopHint }] };
+        }
+      }
+      return;
+    }
+
     const hint = pickHint(toolName, text);
     lastFailedTool.name = typeof toolName === "string" ? toolName : null;
     if (!hint) return;

@@ -40,6 +40,9 @@ const SAFE_PREFIXES: readonly string[] = [
   "make", "cmake ", "ctest",
   "cargo build", "cargo test", "cargo check", "cargo run", "cargo clippy", "cargo fmt",
   "go test", "go build", "go run", "go vet",
+  // Read-only go introspection — models reach for these to inspect stdlib /
+  // module APIs (e.g. `go doc syscall`); none mutate the module or network.
+  "go doc", "go list", "go env", "go version",
   "gradle ", "./gradlew", "mvn ", "dotnet test", "dotnet build",
   "jest", "vitest", "mocha", "tsc",
   "pnpm test", "pnpm run", "yarn test", "yarn run", "bun test", "bun run",
@@ -176,19 +179,34 @@ const INTENT_HINTS: Record<string, string> = {
 };
 
 function suggestNearestPrefix(cmd: string): string | undefined {
-  const head = cmd.trim().split(/\s+/)[0] ?? "";
+  const toks = cmd.trim().split(/\s+/);
+  const head = toks[0] ?? "";
   if (!head) return undefined;
-  // Only suggest a whitelisted prefix when its FIRST TOKEN exactly matches
-  // the requested command head. Anything looser (same first letter, edit
-  // distance, etc.) produces nonsense like cd → "cargo metadata".
-  for (const p of SAFE_PREFIXES) {
-    const ph = p.trim().split(/\s+/)[0];
-    if (ph === head) return p;
+  // Only suggest a whitelisted entry the command's first 1–2 tokens EXACTLY
+  // equal at the subcommand level — never a different sibling. Returning the
+  // first same-head entry produced misleading advice like `go doc` → "go get"
+  // (recommending a network-mutating command to fix a read-only one).
+  const candidates = [toks.slice(0, 2).join(" "), head];
+  for (const c of candidates) {
+    for (const p of SAFE_PREFIXES) {
+      if (p.trim() === c) return p;
+    }
   }
   return undefined;
 }
 
-function buildBlockReason(cmd: string, mode: "auto" | "manual"): string {
+// Whitelisted entries that share a multi-subcommand head (e.g. all `go …` or
+// `cargo …` forms). Used to list the real alternatives when a subcommand of a
+// known tool is blocked, instead of guessing a single (possibly wrong) sibling.
+function headSiblings(head: string): string[] {
+  if (!head) return [];
+  return SAFE_PREFIXES.filter((p) => {
+    const t = p.trim().split(/\s+/);
+    return t.length > 1 && t[0] === head;
+  }).map((p) => p.trim());
+}
+
+export function buildBlockReason(cmd: string, mode: "auto" | "manual"): string {
   // Report the specific offending sub-command, not the whole line's head —
   // for `cd /x && rm -rf` the problem is `rm`, not `cd`.
   const bad = (firstUnsafeSegment(cmd) ?? cmd).trim();
@@ -213,8 +231,12 @@ function buildBlockReason(cmd: string, mode: "auto" | "manual"): string {
   if (intent) return `${prefix} "${head}" — ${intent}`;
 
   const exact = suggestNearestPrefix(bad);
-  const tail = exact
-    ? `Try "${exact.trim()}" instead.`
+  if (exact) return `${prefix} "${head}" is not in SAFE_PREFIXES. Try "${exact.trim()}" instead.`;
+  // For a blocked subcommand of a known multi-subcommand tool, list the actual
+  // whitelisted siblings rather than picking one (which could be destructive).
+  const siblings = headSiblings(head);
+  const tail = siblings.length
+    ? `Whitelisted "${head}" subcommands: ${siblings.join(", ")}.`
     : `Whitelisted starts: ${SAFE_PREFIXES.slice(0, 12).map((p) => p.trim()).join(", ")} ...`;
   return `${prefix} "${head}" is not in SAFE_PREFIXES. ${tail}`;
 }

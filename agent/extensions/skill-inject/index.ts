@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSkillFile } from "./frontmatter.ts";
-import { clearLastFailedTool, getLastFailedTool } from "../tool-error-coach/index.ts";
+import { clearLastFailedTool } from "../tool-error-coach/index.ts";
 import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";
 
 // ── Tool-skill registry ─────────────────────────────────────────────────
@@ -212,8 +212,14 @@ export default function (pi: ExtensionAPI) {
   // emit the relevant skill body as a follow-up so the model sees the
   // full guidance ON THE NEXT TURN, not only at agent_start.
   pi.on("turn_end", async () => {
-    const failed = getLastFailedTool();
-    if (!failed) return;
+    // Gate on the success-aware local signal, NOT tool-error-coach's
+    // getLastFailedTool(): that record is sticky (it isn't cleared when the
+    // tool later succeeds), so a long-resolved failure would resurface a
+    // full skill-body refresher after the task was already complete and green.
+    // `lastFailedTool` is set on the most recent tool_result and nulled on its
+    // next success, so this only fires when the LATEST call to a tool errored.
+    const failed = lastFailedTool;
+    if (!failed) { clearLastFailedTool(); return; }
     // Backoff: only one full-body refresher per consecutive-failure streak of a
     // given tool. Repeated rejections of the same tool (common with hashline
     // `edit`) get the inline one-line hint from tool-error-coach, not another

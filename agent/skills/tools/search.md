@@ -3,7 +3,7 @@ name: search-guidance
 type: tool-guidance
 target_tool: Search
 priority: 8
-token_cost: 100
+token_cost: 125
 user-invocable: false
 ---
 ## search Tool

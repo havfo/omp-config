@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickHint } from "./index.ts";
+import { pickHint, pickNoopHint } from "./index.ts";
 
 describe("pickHint", () => {
   it("matches ENOENT to a Glob suggestion", () => {
@@ -13,5 +13,18 @@ describe("pickHint", () => {
   });
   it("returns undefined for unknown errors", () => {
     expect(pickHint("read", "kernel panic")).toBeUndefined();
+  });
+});
+
+describe("pickNoopHint", () => {
+  it("coaches a byte-identical no-op edit", () => {
+    expect(pickNoopHint("parsed and applied cleanly, but produced no change: your body row(s) are byte-identical"))
+      .toMatch(/changed nothing/);
+  });
+  it("coaches an ast_edit with no replacements", () => {
+    expect(pickNoopHint("No replacements made")).toMatch(/changed nothing/);
+  });
+  it("returns undefined for a normal successful result", () => {
+    expect(pickNoopHint("Successfully wrote 7474 bytes to file.go")).toBeUndefined();
   });
 });
