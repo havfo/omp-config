@@ -7,7 +7,18 @@ modelRoles:
 compaction: 
   supersedeReads: false
   dropUseless: false
-memory: 
+memory:
   backend: "off"
-providers: 
+providers:
   webSearch: kagi
+tools:
+  discoveryMode: all
+  essentialOverride: [read, edit, bash, search, find, write, todo, lsp]
+skills:
+  # Drop omp's native <skills> block (~0.9k): it advertises Claude Code's global
+  # skills/plugins (caveman, context-mode, find-skills, riversideam) which are
+  # unused in autonomous runs. The per-source toggles (enableClaudeUser etc.)
+  # did not remove it, so use the master switch. This is omp's native skill
+  # system only — the skill-inject extension's tool guidance is unaffected, and
+  # the skills stay fully available inside Claude Code.
+  enabled: false

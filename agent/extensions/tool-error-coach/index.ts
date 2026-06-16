@@ -39,6 +39,8 @@ const PER_TOOL_HINTS: Record<string, Hint[]> = {
   edit: [
     { match: /old_string.*(not.*found|no.*match)|string.*(not.*found|did not match)/i,
       hint: "Hint: include 2-3 lines of surrounding context in old_string to make it unique and exact." },
+    { match: /no preceding hunk header|payload line/i,
+      hint: "Hint: each `+body` row must be on its OWN line, after a hunk header. Shape:\n[path#TAG]\\nSWAP N.=M:\\n+line one\\n+line two\n(range separator is `.=`, not `-`; the leading `+` starts each literal line)." },
   ],
   bash: [
     { match: /command not found/i,

@@ -8,6 +8,10 @@ describe("pickHint", () => {
   it("matches old_string-not-found per-tool hint over generic", () => {
     expect(pickHint("edit", "old_string was not found")).toMatch(/2-3 lines/);
   });
+  it("coaches a 'no preceding hunk header' hashline error", () => {
+    expect(pickHint("edit", "line 1: payload line has no preceding hunk header. Use `SWAP N.=M:`"))
+      .toMatch(/own line/i);
+  });
   it("matches whitelist failure", () => {
     expect(pickHint("bash", "bash whitelist: rm not in SAFE_PREFIXES")).toMatch(/whitelisted prefix/);
   });

@@ -197,6 +197,27 @@ describe("repairArgs", () => {
     expect(r.coerced.filter((c) => c.startsWith("input:"))).toEqual([]);
   });
 
+  it("converts a read-style `-` range separator in a SWAP header to `.=`", () => {
+    const input: any = { input: "[a.ts#0DB3]\nSWAP 560-571:\n+func f() {}" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toContain("SWAP 560.=571:");
+    expect(r.coerced).toContain("input:range-sep-fix");
+  });
+
+  it("converts a `-` range separator in a DEL header", () => {
+    const input: any = { input: "[a.ts#0DB3]\nDEL 8-10" };
+    const r = repairArgs("edit", input);
+    expect(input.input).toContain("DEL 8.=10");
+  });
+
+  it("does NOT touch a block op (no range) or a hyphen in body text", () => {
+    const ok = "[a.ts#0DB3]\nSWAP.BLK 12:\n+x := a - b";
+    const input: any = { input: ok };
+    const r = repairArgs("edit", input);
+    expect(input.input).toBe(ok);
+    expect(r.coerced).not.toContain("input:range-sep-fix");
+  });
+
   it("collapses a doubled leading bracket on a section header", () => {
     const input: any = { input: "[[pkg/a/b.go#A2A9]\nSWAP 7.=14:\n+const x = 1" };
     const r = repairArgs("edit", input);

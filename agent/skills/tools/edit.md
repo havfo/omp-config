@@ -3,7 +3,7 @@ name: edit-guidance
 type: tool-guidance
 target_tool: Edit
 priority: 10
-token_cost: 350
+token_cost: 416
 user-invocable: false
 ---
 ## edit Tool (hashline, line-anchored)
@@ -38,4 +38,9 @@ RULES & COMMON MISTAKES:
 4. Prefer ONE edit call per file: all hunks in a single patch, ascending, non-overlapping.
 5. ONE bracket each side: `[PATH#TAG]`. `[[PATH#TAG]` folds the extra `[` into the path
    → "file not found". Copy the header verbatim; don't re-wrap it.
-6. Pure additions use INS.*, never a widened SWAP. Never reformat with edit (run the formatter).
+6. FULL path in the header: `[pkg/aether/foo.go#TAG]`, not just `[foo.go#TAG]`. In
+   `search` output the directory is on the `# dir/` line and the file on the
+   `## name#TAG` line below it — join them into `[dir/name#TAG]`.
+7. Add a single import with `INS.POST` on the last import line — do NOT `SWAP` the
+   whole import block (you will drop an existing import → build break).
+8. Pure additions use INS.*, never a widened SWAP. Never reformat with edit (run the formatter).

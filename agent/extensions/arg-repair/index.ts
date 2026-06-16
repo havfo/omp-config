@@ -116,10 +116,13 @@ const HASHLINE_OP_NUMBERED =
 const HASHLINE_OP_HEADTAIL = /^(\s*)(INS\.HEAD|INS\.TAIL)(\s*:.*)$/i;
 
 // Repair the most common hashline syntax mistakes small models make in an
-// `edit` patch. Three classes, applied per line:
+// `edit` patch. Applied per line:
 //   1. Header: normalize `[[PATH#TAG]` / `[PATH#TAG]]` / `[PATH#TAG` / `#a2a9`
 //      (lowercase tag) to the canonical `[PATH#TAG]` with an uppercase tag.
 //   2. Op keyword case: `swap`/`del`/`ins.post` → `SWAP`/`DEL`/`INS.POST`.
+//   2b. Range separator: read ranges are `N-M`, edit ranges are `N.=M`. Models
+//      carry the read form into a hunk header (`SWAP 560-571:`), which won't
+//      parse → "payload line has no preceding hunk header". Convert `-` → `.=`.
 //   3. DEL/SWAP confusion: a `DEL` has NO colon and NO body; `SWAP` has both.
 //      Models write `DEL N.=M:` + `+body` when they mean REPLACE — that's a SWAP.
 //        - DEL header ending in `:` WITH `+body` after it → convert to SWAP
@@ -146,6 +149,15 @@ export function repairHashlinePatch(patch: string): { patch: string; fixes: stri
     if (op && op[2] !== op[2].toUpperCase()) {
       lines[i] = `${op[1]}${op[2].toUpperCase()}${op[3]}`;
       fixes.push("op-keyword-uppercase");
+    }
+
+    // 2b. Range separator: `SWAP 560-571:` / `DEL 8-10` → `.=` form. Only the
+    //     concrete SWAP/DEL ops take a range; `.BLK`/`INS` forms don't (a `-`
+    //     after `SWAP`/`DEL` + whitespace is unambiguously a mis-typed range).
+    const rng = lines[i].match(/^(\s*)(SWAP|DEL)(\s+)(\d+)-(\d+)(.*)$/);
+    if (rng) {
+      lines[i] = `${rng[1]}${rng[2]}${rng[3]}${rng[4]}.=${rng[5]}${rng[6]}`;
+      fixes.push("range-sep-fix");
     }
 
     // 3. DEL-with-body → SWAP, or strip a stray trailing colon from a bodyless DEL.

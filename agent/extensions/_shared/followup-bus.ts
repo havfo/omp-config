@@ -1,9 +1,9 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 // Shared arbiter so the several extensions that inject a corrective user
-// message on a turn (output-parser, quality-monitor, skill-inject,
-// syntax-guard) don't pile 2-3 contradictory steers onto a small model at
-// once. Each submits its intent here instead of calling pi.sendUserMessage
+// message on a turn (output-parser, quality-monitor, syntax-guard) don't pile
+// 2-3 contradictory steers onto a small model at once. Each submits its intent
+// here instead of calling pi.sendUserMessage
 // directly; the bus delivers at most ONE message per turn — the highest
 // priority — flushed on a macrotask after all of that turn's handlers settle.
 

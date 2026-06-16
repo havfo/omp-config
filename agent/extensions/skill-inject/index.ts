@@ -3,8 +3,6 @@ import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSkillFile } from "./frontmatter.ts";
-import { clearLastFailedTool } from "../tool-error-coach/index.ts";
-import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";
 
 // ── Tool-skill registry ─────────────────────────────────────────────────
 // Loads skills/tools/*.md once, hooks `before_agent_start` to append a
@@ -37,12 +35,6 @@ function adaptiveMode(): boolean {
 // signals by the time the next `before_agent_start` fires.
 const recentToolCalls: string[] = []; // most-recent-first, capped at 8
 let lastFailedTool: string | null = null;
-// The tool we've already shown the full-body refresher for in the CURRENT
-// failure streak. The hashline `edit` tool throws (isError) on every rejected
-// patch, so without this the refresher re-dumps the whole skill body every
-// failed turn ("repeatedly nudges 'edit just failed'"). Fire once per streak;
-// a successful call to that tool clears it so a later failure can refresh again.
-let refresherShownFor: string | null = null;
 
 // ── Intent keywords → likely tools ──────────────────────────────────────
 const INTENT_MAP: Record<string, string[]> = {
@@ -185,11 +177,20 @@ export default function (pi: ExtensionAPI) {
     sessionStableBlock = undefined;
     recentToolCalls.length = 0;
     lastFailedTool = null;
-    refresherShownFor = null;
   });
 
   // Track tool usage across the whole session so recency + error-recovery
-  // state is available on the next before_agent_start.
+  // state is available on the next before_agent_start. A failed tool's skill is
+  // re-injected there (selectSkills prioritizes `lastFailedTool`) — fresh each
+  // turn, budget-aware, and part of the prompt rather than a queued message.
+  //
+  // We deliberately do NOT also push a `turn_end` follow-up refresher: a
+  // `followUp` is a queued user message, consumed only when the agent next
+  // pauses for input. During a long autonomous run it strands and gets drained
+  // at the very end, surfacing a stale "Tool 'edit' just failed" AFTER the task
+  // is already done and green. The before_agent_start injection above + the
+  // inline one-line hint from tool-error-coach cover the failure without that
+  // delivery hazard.
   pi.on("tool_result", async (event) => {
     const name = (event as any).toolName || (event as any).name;
     if (typeof name === "string") {
@@ -201,40 +202,6 @@ export default function (pi: ExtensionAPI) {
     }
     const isError = (event as any).isError === true;
     lastFailedTool = isError && typeof name === "string" ? name : null;
-    // A successful call ends that tool's failure streak → allow a fresh
-    // refresher next time it fails.
-    if (!isError && typeof name === "string" && name === refresherShownFor) {
-      refresherShownFor = null;
-    }
-  });
-
-  // Mid-session re-inject: when tool-error-coach flags a recent failure,
-  // emit the relevant skill body as a follow-up so the model sees the
-  // full guidance ON THE NEXT TURN, not only at agent_start.
-  pi.on("turn_end", async () => {
-    // Gate on the success-aware local signal, NOT tool-error-coach's
-    // getLastFailedTool(): that record is sticky (it isn't cleared when the
-    // tool later succeeds), so a long-resolved failure would resurface a
-    // full skill-body refresher after the task was already complete and green.
-    // `lastFailedTool` is set on the most recent tool_result and nulled on its
-    // next success, so this only fires when the LATEST call to a tool errored.
-    const failed = lastFailedTool;
-    if (!failed) { clearLastFailedTool(); return; }
-    // Backoff: only one full-body refresher per consecutive-failure streak of a
-    // given tool. Repeated rejections of the same tool (common with hashline
-    // `edit`) get the inline one-line hint from tool-error-coach, not another
-    // copy of the whole skill body.
-    if (failed === refresherShownFor) { clearLastFailedTool(); return; }
-    loadSkills();
-    const sk = skills.get(failed) ?? skills.get(displayName(failed));
-    if (!sk) { clearLastFailedTool(); return; }
-    submitFollowUp(
-      pi, "skill-inject", FollowUpPriority.REFRESHER,
-      `Tool '${failed}' just failed. Refresher on its correct usage:\n\n${sk.body}`,
-      "followUp",
-    );
-    refresherShownFor = failed;
-    clearLastFailedTool();
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
@@ -246,13 +213,24 @@ export default function (pi: ExtensionAPI) {
     const budget: number = extOpts.skillTokenBudget ?? 300;
     if (budget <= 0) return;
 
-    // Optional tool allow-list (OMPX_ALLOWED_TOOLS): filter skills to the
-    // allowed subset. Unset → no filtering.
+    // Restrict injected skills to tools actually LOADED this session. With
+    // `tools.discoveryMode: all`, omp defers most built-ins behind a search
+    // tool; injecting their usage skills (browser, agent, …) would waste ~2k of
+    // prompt on guidance for tools that aren't even present. `getActiveTools()`
+    // gives the live set; intersect it with any explicit OMPX_ALLOWED_TOOLS.
+    // Tool names come back canonical (lowercase) but skills are keyed by
+    // target_tool (TitleCase), so admit both forms.
+    const expand = (names: string[]): string[] => names.flatMap((n) => [n, displayName(n)]);
     const envAllowed = process.env.OMPX_ALLOWED_TOOLS
       ?.split(",").map((s) => s.trim()).filter(Boolean);
-    const allowedList: string[] | undefined =
-      envAllowed && envAllowed.length ? envAllowed : undefined;
-    const allowed = allowedList ? new Set(allowedList) : undefined;
+    let active: string[] | undefined;
+    try { const a = pi.getActiveTools?.(); if (Array.isArray(a) && a.length) active = a; } catch { /* unavailable in some run modes */ }
+    let allowList: string[] | undefined = active ? expand(active) : undefined;
+    if (envAllowed && envAllowed.length) {
+      const env = new Set(expand(envAllowed));
+      allowList = allowList ? allowList.filter((n) => env.has(n)) : expand(envAllowed);
+    }
+    const allowed = allowList ? new Set(allowList) : undefined;
 
     // Knowledge-inject may publish required_tools on systemPromptOptions —
     // pre-add those before selecting so they win even when budget is tight.
