@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import {
   _state,
+  collectLiveDeliveries,
   compactNote,
   evaluateRead,
+  pruneToLiveContext,
   isSubset,
   MIN_SUPPRESS_LINES,
   parseShownLines,
@@ -136,6 +139,53 @@ describe("shouldSuppress (size threshold)", () => {
   it("never suppresses non-redundant reads regardless of size", () => {
     evaluateRead("f", "A1B2", rangeSet(1, 50));
     expect(shouldSuppress("f", "A1B2", rangeSet(500, 600))).toBe(false);
+  });
+});
+
+describe("liveness after compaction", () => {
+  // A context that still contains the read body that delivered `f.go` at A1B2.
+  const withBody = [
+    { role: "user", content: "go" },
+    { role: "toolResult", content: [{ type: "text", text: "[f.go#A1B2]\n1:package f" }] },
+  ];
+
+  it("counts a content-bearing delivery", () => {
+    expect(collectLiveDeliveries(withBody).get(`${resolve("f.go")}#A1B2`)).toBe(1);
+  });
+
+  it("does NOT count our own suppression note as a delivery", () => {
+    const note = compactNote("f.go", "A1B2", rangeSet(1, 200));
+    expect(collectLiveDeliveries([{ content: note }]).size).toBe(0);
+  });
+
+  it("keeps suppressing while the body is still in context", () => {
+    const key = resolve("f.go");
+    shouldSuppress(key, "A1B2", rangeSet(1, 200));
+    pruneToLiveContext(collectLiveDeliveries(withBody));
+    expect(shouldSuppress(key, "A1B2", rangeSet(1, 200))).toBe(true);
+  });
+
+  it("lets the re-read through once compaction dropped the body", () => {
+    const key = resolve("f.go");
+    shouldSuppress(key, "A1B2", rangeSet(1, 200));
+    // post-compaction context: a summary, no tool results
+    pruneToLiveContext(collectLiveDeliveries([{ role: "user", content: "summary of work" }]));
+    expect(shouldSuppress(key, "A1B2", rangeSet(1, 200))).toBe(false);
+  });
+
+  it("forgets a path when only some of its deliveries survived", () => {
+    const key = resolve("f.go");
+    shouldSuppress(key, "A1B2", rangeSet(1, 50)); // delivery 1
+    shouldSuppress(key, "A1B2", rangeSet(400, 500)); // delivery 2 (new range)
+    pruneToLiveContext(collectLiveDeliveries(withBody)); // only one survives
+    expect(shouldSuppress(key, "A1B2", rangeSet(1, 50))).toBe(false);
+  });
+
+  it("does not resurrect state from a body at a different tag", () => {
+    const key = resolve("f.go");
+    shouldSuppress(key, "A1B2", rangeSet(1, 200));
+    pruneToLiveContext(collectLiveDeliveries([{ content: "[f.go#C3D4]\n1:package f" }]));
+    expect(shouldSuppress(key, "A1B2", rangeSet(1, 200))).toBe(false);
   });
 });
 

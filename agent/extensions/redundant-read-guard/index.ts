@@ -21,10 +21,21 @@ import { isFileReadTool, pathArgOf, specOf } from "../_shared/taxonomy.ts";
 // shown-set to just the changed region it echoed (carrying old line numbers
 // across an edit would be unsafe). A read of that region is then redundant;
 // a read elsewhere flows.
+//
+// LIVENESS: "already holds" is only true while the delivering tool result is
+// still in the context window. Compaction, shake, rewind and branching all drop
+// old tool results, after which the model genuinely needs the body back — and a
+// suppression note there is actively harmful (the model has nothing to reuse and
+// either loops or escapes to `cat`). So on every `context` event we re-verify
+// each remembered delivery against the messages actually being sent, and forget
+// any path whose bodies are no longer there. That covers every removal path at
+// once, without having to enumerate compaction events.
 
 interface Shown {
   tag: string;
   lines: Set<number>;
+  /** How many tool-result bodies at this tag we believe are live in context. */
+  deliveries: number;
 }
 
 const shown = new Map<string, Shown>();
@@ -85,9 +96,12 @@ function rangeDesc(lines: Set<number>): string {
   return `lines ${nums[0]}-${nums[nums.length - 1]}`;
 }
 
+// Marks our own note so the liveness scan never mistakes it for a real body.
+export const NOTE_MARKER = " — unchanged.";
+
 export function compactNote(path: string, tag: string, lines: Set<number>): string {
   return (
-    `[${path}#${tag}] — unchanged. You already have ${rangeDesc(lines)} at tag ` +
+    `[${path}#${tag}]${NOTE_MARKER} You already have ${rangeDesc(lines)} at tag ` +
     `${tag} earlier in this conversation; full content suppressed to save context. ` +
     `Reuse that tag to edit (no re-read needed). Re-read only a DIFFERENT range, ` +
     `or after a stale-tag rejection.`
@@ -115,26 +129,84 @@ export function evaluateRead(
   if (prev && prev.tag === tag) {
     for (const x of lines) prev.lines.add(x); // same snapshot, widen coverage
   } else {
-    shown.set(key, { tag, lines: new Set(lines) }); // new/changed snapshot
+    shown.set(key, { tag, lines: new Set(lines), deliveries: 0 }); // new/changed snapshot
   }
   return { redundant: false };
+}
+
+// Record that one more body at this tag is now sitting in the context window.
+function noteDelivered(key: string, tag: string): void {
+  const entry = shown.get(key);
+  if (entry && entry.tag === tag) entry.deliveries++;
 }
 
 // Policy wrapper: suppress only a redundant read whose body is large enough to
 // be worth stripping from history. Advances state via {@link evaluateRead}.
 export function shouldSuppress(key: string, tag: string, lines: Set<number>): boolean {
   const { redundant } = evaluateRead(key, tag, lines);
-  return redundant && lines.size >= MIN_SUPPRESS_LINES;
+  const suppress = redundant && lines.size >= MIN_SUPPRESS_LINES;
+  if (!suppress) noteDelivered(key, tag); // the body itself reaches the model
+  return suppress;
 }
 
 // An edit advances the tag and echoes the changed region; reset the path's
 // shown-set to exactly that region under the new tag.
 export function recordEdit(key: string, tag: string, lines: Set<number>): void {
-  shown.set(key, { tag, lines: new Set(lines) });
+  shown.set(key, { tag, lines: new Set(lines), deliveries: 1 });
+}
+
+// --- liveness -------------------------------------------------------------
+
+// A `[PATH#TAG]` header that is NOT one of our suppression notes, i.e. a result
+// that actually carried content.
+const BODY_HEADER_RE = new RegExp(
+  `\\[([^\\]\\n]*)#([0-9A-Fa-f]{4})\\](?!${NOTE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`,
+  "g",
+);
+
+function eachString(value: unknown, visit: (s: string) => void): void {
+  if (typeof value === "string") visit(value);
+  else if (Array.isArray(value)) for (const v of value) eachString(v, visit);
+  else if (value && typeof value === "object") {
+    for (const v of Object.values(value as Record<string, unknown>)) eachString(v, visit);
+  }
+}
+
+// Count, per `key#tag`, the content-bearing deliveries present in `messages`.
+export function collectLiveDeliveries(messages: unknown): Map<string, number> {
+  const live = new Map<string, number>();
+  eachString(messages, (s) => {
+    if (!s.includes("#")) return;
+    BODY_HEADER_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = BODY_HEADER_RE.exec(s))) {
+      const key = normalize(m[1]);
+      if (!key) continue;
+      const id = `${key}#${m[2].toUpperCase()}`;
+      live.set(id, (live.get(id) ?? 0) + 1);
+    }
+  });
+  return live;
+}
+
+// Forget any path whose remembered bodies are no longer all present in the
+// context being sent — after compaction/shake/rewind the model no longer holds
+// what we would otherwise refuse to re-deliver.
+export function pruneToLiveContext(live: Map<string, number>): void {
+  for (const [key, entry] of [...shown]) {
+    if ((live.get(`${key}#${entry.tag}`) ?? 0) < entry.deliveries) shown.delete(key);
+  }
 }
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async () => { shown.clear(); });
+  pi.on("session_switch", async () => { shown.clear(); });
+  pi.on("session_branch", async () => { shown.clear(); });
+
+  // Ground truth: whatever is about to be sent is exactly what the model holds.
+  pi.on("context", async (event) => {
+    pruneToLiveContext(collectLiveDeliveries((event as any).messages));
+  });
 
   pi.on("tool_result", async (event) => {
     if ((event as any).isError) return;

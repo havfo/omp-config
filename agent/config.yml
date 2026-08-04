@@ -3,24 +3,41 @@ theme:
   dark: titanium
 setupVersion: 1
 modelRoles: 
-  default: llama.cpp/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+  default: llama.cpp//run/media/havfo/Data/ai/llm/Qwen3.6-27B-Q5_K_M-mtp.gguf
 compaction: 
   supersedeReads: false
   dropUseless: false
+  strategy: context-full
 memory: 
   backend: "off"
 providers: 
-  webSearch: kagi
+  webSearchOrder: 
+    - kagi
+    - perplexity
+    - gemini
+    - anthropic
+    - codex
+    - xai
+    - zai
+    - exa
+    - tinyfish
+    - jina
+    - tavily
+    - firecrawl
+    - brave
+    - kimi
+    - parallel
+    - synthetic
+    - searxng
+    - startpage
+    - duckduckgo
+    - ecosia
+    - google
+    - mojeek
+    - public
 tools: 
-  discoveryMode: all
-  essentialOverride: 
-    - read
-    - edit
-    - bash
-    - search
-    - find
-    - write
-    - todo
-    - lsp
+  {}
 skills: 
   enabled: false
+disabledExtensions: 
+  []

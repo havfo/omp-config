@@ -5,3 +5,4 @@ providers:
     auth: none
     discovery:
       type: llama.cpp
+
