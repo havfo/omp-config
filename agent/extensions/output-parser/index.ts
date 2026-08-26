@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { parseTextToolCalls } from "./parser.ts";
 import { extractMessageParts } from "../_shared/text.ts";
 import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";
@@ -12,19 +12,27 @@ import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";
 // turn rather than after a round-trip. Gate via env OMPX_PARSER_ACTIVE=1
 // or auto-detect by model id containing "27b".
 
-let currentModelId: string | undefined;
-function activeRepairOn(): boolean {
+// Read the live model off the extension context rather than tracking it from
+// an event. The old `pi.on("model_select")` handler here targeted an event omp
+// does not have (it is not in the hook set at all), so `currentModelId` stayed
+// undefined forever and the /27b|dense/ test below never matched — the ACTIVE
+// path was silently dead unless OMPX_PARSER_ACTIVE=1 was set by hand.
+// `ctx.models.current()` is read lazily, so it also follows a `/model` switch
+// mid-session, which an event-cached id would not.
+function modelIdOf(ctx: unknown): string {
+  const m = (ctx as any)?.models?.current?.();
+  if (!m) return "";
+  if (typeof m === "string") return m;
+  return String(m.id ?? m.modelId ?? m.name ?? "");
+}
+
+function activeRepairOn(ctx: unknown): boolean {
   if (process.env.OMPX_PARSER_ACTIVE === "1") return true;
   if (process.env.OMPX_PARSER_ACTIVE === "0") return false;
-  return /27b|dense/i.test(currentModelId ?? "");
+  return /27b|dense/i.test(modelIdOf(ctx));
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("model_select", async (event) => {
-    const m = (event as any).model;
-    currentModelId = m?.id ?? m?.modelId ?? currentModelId;
-  });
-
   pi.on("turn_end", async (event, ctx) => {
     const message = (event as any).message;
     if (!message) return;
@@ -40,7 +48,7 @@ export default function (pi: ExtensionAPI) {
     if (calls.length === 0) return;
 
     const names = calls.map((c) => c.name).join(", ");
-    const active = activeRepairOn();
+    const active = activeRepairOn(ctx);
     ctx.ui.notify(
       `output-parser: ${calls.length} fenced call(s) [${names}] — ${active ? "ACTIVE repair (steer)" : "passive nudge"}`,
       "warning",

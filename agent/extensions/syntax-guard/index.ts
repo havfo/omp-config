@@ -1,6 +1,7 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { readFileSync, existsSync } from "node:fs";
-import { isFileWriteTool, pathArgOf } from "../_shared/taxonomy.ts";
+import { isFileWriteTool } from "../_shared/taxonomy.ts";
+import { writeToolTargets } from "../_shared/paths.ts";
 import { parseSource, getExtension, isSupported } from "./parsers.ts";
 import {
   collectErrors,
@@ -16,7 +17,8 @@ import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";
 // Post-edit syntax validation using tree-sitter. After a successful edit
 // or write, parse the resulting file and check for newly introduced syntax
 // errors. If new errors are found, append a diagnostic to the tool result
-// AND queue a followUp message so the model can fix them immediately.
+// AND steer the model to fix them immediately — re-verified at delivery so a
+// correction whose subject is already repaired is dropped instead of sent.
 //
 // Strategy:
 //   - On tool_call (edit): snapshot pre-edit error count
@@ -25,8 +27,11 @@ import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";
 // Only runs for file types with available tree-sitter grammars.
 // Falls back gracefully (no-op) for unsupported languages.
 
-// Pre-edit snapshots keyed by tool call ID
+// Pre-edit snapshots keyed by tool call ID + target path. A single `edit`
+// call can carry sections for several files, so the call id alone is not a
+// unique key.
 const preEditSnapshots = new Map<string, SyntaxDiagnostic[]>();
+const snapKey = (callId: string, path: string) => `${callId} ${path}`;
 
 // Limit how many syntax followUps we send per session to avoid annoyance
 let syntaxFollowUpsThisSession = 0;
@@ -61,6 +66,19 @@ async function getFileDiagnostics(filePath: string): Promise<SyntaxDiagnostic[] 
   return errors;
 }
 
+/**
+ * True while at least one flagged file still parses worse than it did before
+ * the edit. Used to drop a queued correction whose subject has been fixed in
+ * the meantime.
+ */
+async function stillRegressed(baselines: Map<string, number>): Promise<boolean> {
+  for (const [filePath, before] of baselines) {
+    const now = await getFileDiagnostics(filePath);
+    if (now !== null && now.length > before) return true;
+  }
+  return false;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async () => {
     preEditSnapshots.clear();
@@ -74,26 +92,27 @@ export default function (pi: ExtensionAPI) {
     if (!isFileWriteTool(name)) return;
 
     const input = (event as any).input ?? {};
-    const filePath = input.path ?? input.file_path;
     const toolCallId = (event as any).toolCallId ?? (event as any).id;
-
-    if (typeof filePath !== "string" || !filePath) return;
     if (typeof toolCallId !== "string" || !toolCallId) return;
 
-    // Only snapshot for supported languages
-    const ext = getExtension(filePath);
-    if (!isSupported(ext)) return;
+    // `edit` names its targets inside the hashline patch, `ast_edit` in a
+    // `paths` array — neither has a `path` argument to key off.
+    for (const filePath of writeToolTargets(name, input)) {
+      // Only snapshot for supported languages
+      const ext = getExtension(filePath);
+      if (!isSupported(ext)) continue;
 
-    // For write (new file), there are no pre-existing errors
-    if (name?.toLowerCase() === "write") {
-      preEditSnapshots.set(toolCallId, []);
-      return;
-    }
+      // For write (new file), there are no pre-existing errors
+      if (name?.toLowerCase() === "write") {
+        preEditSnapshots.set(snapKey(toolCallId, filePath), []);
+        continue;
+      }
 
-    // For edit, capture current errors
-    const diags = await getFileDiagnostics(filePath);
-    if (diags !== null) {
-      preEditSnapshots.set(toolCallId, diags);
+      // For edit, capture current errors
+      const diags = await getFileDiagnostics(filePath);
+      if (diags !== null) {
+        preEditSnapshots.set(snapKey(toolCallId, filePath), diags);
+      }
     }
   });
 
@@ -107,56 +126,76 @@ export default function (pi: ExtensionAPI) {
     if (!isFileWriteTool(name)) return;
 
     const input = (event as any).input ?? {};
-    const filePath = input.path ?? input.file_path;
     const toolCallId = (event as any).toolCallId ?? (event as any).id;
 
-    if (typeof filePath !== "string" || !filePath) return;
+    const summaries: string[] = [];
+    const followUpSections: string[] = [];
+    // path → error count the file had BEFORE this edit, so the queued message
+    // can re-check on delivery whether the regression is still there.
+    const baselines = new Map<string, number>();
+    let totalNewErrors = 0;
+    let lastPath = "";
 
-    // Check if we have a pre-edit snapshot
-    const beforeErrors = toolCallId ? preEditSnapshots.get(toolCallId) : undefined;
-    if (toolCallId) preEditSnapshots.delete(toolCallId);
+    for (const filePath of writeToolTargets(name, input)) {
+      const key = typeof toolCallId === "string" && toolCallId
+        ? snapKey(toolCallId, filePath)
+        : undefined;
 
-    // Parse the file after the edit
-    const afterErrors = await getFileDiagnostics(filePath);
-    if (afterErrors === null) return; // unsupported or unreadable
+      // Check if we have a pre-edit snapshot
+      const beforeErrors = key ? preEditSnapshots.get(key) : undefined;
+      if (key) preEditSnapshots.delete(key);
 
-    // No errors at all — great, nothing to do
-    if (afterErrors.length === 0) return;
+      // Parse the file after the edit. An `MV` source is gone by now, which
+      // reads as unparseable and is correctly skipped.
+      const afterErrors = await getFileDiagnostics(filePath);
+      if (afterErrors === null) continue; // unsupported or unreadable
 
-    // If we have a pre-edit snapshot, only report NEW errors
-    let newErrors: SyntaxDiagnostic[];
-    if (beforeErrors !== undefined) {
-      newErrors = diffErrors(beforeErrors, afterErrors);
-    } else {
-      // No snapshot — report all errors (conservative)
-      // But only if there are many (>3), to avoid noise on files that already had errors
-      if (afterErrors.length <= 3) return;
-      newErrors = afterErrors;
+      // No errors at all — great, nothing to do
+      if (afterErrors.length === 0) continue;
+
+      // Without a pre-edit snapshot there is no way to tell this call's damage
+      // from errors the file already carried (an `MV` destination, a file this
+      // session never edited before). Reporting them all blamed the current
+      // edit for someone else's breakage, so stay quiet instead.
+      if (beforeErrors === undefined) continue;
+
+      const newErrors = diffErrors(beforeErrors, afterErrors);
+      if (newErrors.length === 0) continue;
+
+      summaries.push(buildErrorSummary(filePath, newErrors, afterErrors.length));
+      followUpSections.push(
+        `${filePath} — ${newErrors.length} syntax error(s):\n` + formatDiagnostics(newErrors),
+      );
+      baselines.set(filePath, beforeErrors.length);
+      totalNewErrors += newErrors.length;
+      lastPath = filePath;
     }
 
-    if (newErrors.length === 0) return;
-
-    // Build the warning message
-    const summary = buildErrorSummary(filePath, newErrors, afterErrors.length);
+    if (totalNewErrors === 0) return;
 
     // Notify in the UI
+    const where = summaries.length === 1 ? lastPath : `${summaries.length} files`;
     try {
       ctx.ui.notify(
-        `syntax-guard: ${newErrors.length} new syntax error(s) in ${filePath}`,
+        `syntax-guard: ${totalNewErrors} new syntax error(s) in ${where}`,
         "warning",
       );
     } catch {}
 
-    // Send a followUp so the model is prompted to fix errors on its next turn
+    // Nudge the model to fix the file. Delivered as a `steer` — a `followUp`
+    // is only drained once the agent loop goes idle, which in a long
+    // autonomous run landed these hours after the edit, long after the model
+    // had already fixed the file, and cost it a full re-read + tsc detour.
+    // Re-parse on delivery too: even a steer can arrive after the repair.
     if (syntaxFollowUpsThisSession < MAX_FOLLOWUPS_PER_SESSION) {
       syntaxFollowUpsThisSession++;
-      const diagnosticList = formatDiagnostics(newErrors);
       submitFollowUp(
         pi, "syntax-guard", FollowUpPriority.SYNTAX_ERROR,
-        `Your last edit to ${filePath} introduced ${newErrors.length} syntax error(s):\n` +
-        diagnosticList + "\n\n" +
+        `Your last ${name} introduced ${totalNewErrors} syntax error(s):\n` +
+        followUpSections.join("\n") + "\n\n" +
         "Please fix these syntax errors now before making further changes.",
-        "followUp",
+        "steer",
+        () => stillRegressed(baselines),
       );
     }
 
@@ -166,7 +205,7 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [
           ...existingContent,
-          { type: "text" as const, text: summary },
+          { type: "text" as const, text: summaries.join("\n\n") },
         ],
         isError: false,
       };

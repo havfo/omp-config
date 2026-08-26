@@ -1,7 +1,8 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { isFileReadTool, pathArgOf, specOf } from "../_shared/taxonomy.ts";
+import { stripReadSelector } from "../_shared/paths.ts";
 
 // Suppress the body of a READ that re-delivers content the model already holds
 // this session, replacing it with a compact pointer to the snapshot it already
@@ -43,7 +44,7 @@ const shown = new Map<string, Shown>();
 function normalize(p: unknown): string | undefined {
   if (typeof p !== "string" || !p) return undefined;
   // Strip a read line-range/tag selector before resolving (`f.go:29-67` → `f.go`).
-  const bare = p.replace(/:[0-9,\-]+$/, "").replace(/#[0-9A-Fa-f]{4}$/, "");
+  const bare = stripReadSelector(p);
   let resolved = bare;
   if (resolved === "~") resolved = homedir();
   else if (resolved.startsWith("~/")) resolved = homedir() + resolved.slice(1);

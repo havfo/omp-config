@@ -1,8 +1,9 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { isFileReadTool, isFileWriteTool, isShellTool, pathArgOf, specOf } from "../_shared/taxonomy.ts";
+import { stripReadSelector } from "../_shared/paths.ts";
 
 // Block Edit when the target file hasn't been Read this session.
 // Local models routinely emit Edit with guessed old_string and burn turns
@@ -26,9 +27,9 @@ const readPaths = new Set<string>();
 // Fed by read AND edit results so reconciliation keys off the current tag.
 const fileTags = new Map<string, { tag: string; display: string }>();
 
-function stripSelector(p: string): string {
-  return p.replace(/:[0-9,\-]+$/, "").replace(/#[0-9A-Fa-f]{4}$/, "");
-}
+// A selector left on the path resolves to a file that doesn't exist, so an
+// edit after a ranged read would wrongly look unread. See _shared/paths.ts.
+const stripSelector = stripReadSelector;
 
 function normalize(p: unknown): string | undefined {
   if (typeof p !== "string" || !p) return undefined;
@@ -49,7 +50,7 @@ export function buildReadFirstRecipe(filePath: string): string {
     `Recipe:\n` +
     `  1. {"name":"read","input":{"path":"${filePath}"}}  → gives [${filePath}#TAG] and LINE:TEXT rows\n` +
     `  2. build a hashline patch anchored on that tag, e.g.\n` +
-    `     {"name":"edit","input":{"input":"[${filePath}#TAG]\\nSWAP N.=M:\\n+<new line>"}}\n` +
+    `     {"name":"edit","input":{"input":"[${filePath}#TAG]\\nPUT N.=M:\\n+<new line>"}}\n` +
     `  (the file path goes inside the [PATH#TAG] header; edit has no separate path arg)`
   );
 }

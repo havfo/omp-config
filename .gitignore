@@ -6,6 +6,20 @@
 # Conversation & terminal session state
 /agent/sessions/
 /agent/terminal-sessions/
+/agent/blobs/
+/agent/cache/
+/agent/history*
+/agent/memories/
+/agent/node_modules/
+
+cache/
+
+install-id
+
+natives/
+puppeteer/
+run/
+webcache/
 
 # Logs
 /logs/
@@ -19,13 +33,8 @@ node_modules/
 # Claude Code local state (not part of the harness config)
 /.claude/
 
-# Stale skill docs for tools removed from the extension stack
-/agent/skills/tools/glob.md
-/agent/skills/tools/webfetch.md
-/agent/skills/tools/browser_click.md
-/agent/skills/tools/browser_extract.md
-/agent/skills/tools/browser_navigate.md
-/agent/skills/tools/browser_type.md
-/agent/skills/tools/evidence_add.md
-/agent/skills/tools/shell_session.md
+# Stale skill docs for tools removed from the extension stack.
+# The tools/*.md entries were dropped 2026-08-19: those files are now deleted
+# outright, and `glob.md` is tracked again — `glob` is a real current tool
+# (omp renamed `find` to `glob` in 16.2.x).
 /agent/skills/protocols/cite_before_answer.md

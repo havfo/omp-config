@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { assessResponse, buildCorrectionMessage, resetStallCounter, type ToolCall } from "./quality.ts";
 import { extractMessageParts } from "../_shared/text.ts";
 import { submitFollowUp, FollowUpPriority } from "../_shared/followup-bus.ts";

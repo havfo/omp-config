@@ -1,43 +1,49 @@
 symbolPreset: nerd
 theme: 
   dark: titanium
-setupVersion: 1
+setupVersion: 2
 modelRoles: 
-  default: llama.cpp//run/media/havfo/Data/ai/llm/Qwen3.6-27B-Q5_K_M-mtp.gguf
+  default: llama.cpp//run/media/havfo/Data/ai/llm/Qwen3.8-27B-UD-Q4_K_XL.gguf
 compaction: 
+  asyncEnabled: false
   supersedeReads: false
   dropUseless: false
-  strategy: context-full
+  methodOrder: 
+    - remote
+    - soft
+  idleEnabled: false
 memory: 
   backend: "off"
 providers: 
   webSearchOrder: 
     - kagi
-    - perplexity
-    - gemini
-    - anthropic
-    - codex
-    - xai
-    - zai
-    - exa
-    - tinyfish
-    - jina
-    - tavily
-    - firecrawl
     - brave
-    - kimi
-    - parallel
-    - synthetic
-    - searxng
-    - startpage
     - duckduckgo
-    - ecosia
+    - gemini
     - google
-    - mojeek
-    - public
 tools: 
   {}
 skills: 
   enabled: false
 disabledExtensions: 
   []
+astGrep: 
+  enabled: false
+task: 
+  maxConcurrency: 1
+  enableLsp: true
+  maxRecursionDepth: 0
+proseOnlyThinking: false
+defaultThinkingLevel: medium
+title: 
+  refreshOnReplan: false
+tui: 
+  titleState: false
+composer: 
+  shape: box
+recap: 
+  enabled: false
+goal: 
+  statusInFooter: false
+dev: 
+  autoqaConsent: granted

@@ -85,8 +85,9 @@ describe("skills directory loads from repo", () => {
       if (typeof t === "string") targets.add(t);
     }
     // The shipped set covers the core file/shell/search tools. Content search
-    // is `search` (target_tool "Search") — there is no `grep` tool.
-    for (const core of ["Read", "Write", "Edit", "Bash", "Glob", "Search"]) {
+    // is `grep` and file-name lookup is `glob` (renamed from `search`/`find`
+    // in omp 16.2.x).
+    for (const core of ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]) {
       expect(targets.has(core), `expected target_tool=${core}`).toBe(true);
     }
   });

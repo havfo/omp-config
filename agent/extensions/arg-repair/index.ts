@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { homedir } from "node:os";
 import { specOf } from "../_shared/taxonomy.ts";
 
@@ -22,11 +22,14 @@ import { specOf } from "../_shared/taxonomy.ts";
 // We log every repair via ctx.ui.notify so quality-monitor can attribute
 // recoveries.
 
+// Numeric/boolean args omp actually has (17.4.0): glob.limit, bash.timeout,
+// grep.skip / ast_grep.skip, web_search.limit, and the boolean flags on
+// glob/grep/bash. Local models routinely send these as strings.
 const NUMERIC_KEYS = new Set([
-  "offset", "limit", "timeout", "head_limit", "context",
+  "limit", "timeout", "skip", "max_tokens", "num_search_results",
 ]);
 const BOOL_KEYS = new Set([
-  "replaceAll", "run_in_background", "ignoreCase", "literal",
+  "hidden", "gitignore", "case", "pty", "async",
 ]);
 
 // Arg names whose values are paths. We tilde-expand them.
@@ -34,19 +37,24 @@ const PATH_VALUE_KEYS = new Set([
   "path", "file_path", "filepath", "filename",
 ]);
 
-// The single-string glob-pattern arg per canonical tool. `search.pattern` is a
-// REGEX and is deliberately excluded — quotes/brackets can be legitimate there
-// (its glob-array scope arg `paths` is handled separately below).
-const GLOB_PATTERN_ARGS: Record<string, string> = {
-  find: "pattern",
+// The SEMICOLON-delimited path-scope arg per canonical tool. omp's `grep` and
+// `glob` both take their scope as ONE string where multiple targets are joined
+// with `;` ("internal/bwe/**;cmd/"). Models trained on array-shaped search
+// tools send a real array, or a JSON-stringified one ('["a/","b/"]'), and the
+// tool then reads the whole thing as a single broken glob → "unclosed
+// character class". We normalize all of those back to one `;` string.
+// `grep.pattern` is a REGEX and is deliberately excluded — quotes and brackets
+// can be legitimate there. `glob` has no pattern arg at all (the taxonomy
+// aliases a stray `pattern` onto `path` before we get here).
+const PATH_LIST_ARGS: Record<string, string> = {
+  grep: "path",
+  glob: "path",
 };
 
-// The ARRAY-of-globs arg per canonical tool. The model frequently serializes
-// these as a JSON-stringified array ('["a/","b/"]'); the tool then splits the
-// raw string on commas into broken globs ('["a/') → "unclosed character class".
-const GLOB_ARRAY_ARGS: Record<string, string> = {
-  search: "paths",
-};
+// Spellings of the OLD ignore-case flag. omp replaced `i` with `case`, whose
+// meaning is INVERTED (case === true means case-SENSITIVE, and it is the
+// default), so a straight alias would silently flip the model's intent.
+const IGNORE_CASE_KEYS = ["i", "ignore_case", "ignorecase", "ignoreCase"];
 
 // Strip JSON-array/string artifacts a model wrongly put in a glob. Only fires
 // when a quote is present, which never happens in a valid glob — so character
@@ -56,36 +64,44 @@ function repairGlobPattern(p: string): string {
   return p.replace(/["'[\]]/g, "");
 }
 
-// Coerce a glob-array arg into a clean string[]. Handles: a real array (clean
-// each element), a JSON-stringified array (parse it), and a stringified array
-// that is itself malformed/truncated (e.g. missing the closing ']') by
-// stripping brackets/quotes and splitting on commas. Returns undefined when the
-// value is already a clean array needing no change.
-function repairGlobArray(value: unknown): string[] | undefined {
-  if (Array.isArray(value)) {
-    let changed = false;
-    const out = value.map((el) => {
-      if (typeof el !== "string") return el;
-      const fixed = repairGlobPattern(el);
-      if (fixed !== el) changed = true;
-      return fixed;
-    });
-    return changed ? (out as string[]) : undefined;
-  }
+// Coerce a path-scope arg into omp's single `;`-delimited string. Handles: a
+// real array (clean each element, join), a JSON-stringified array (parse it),
+// a stringified array that is itself malformed/truncated (e.g. missing the
+// closing ']') by stripping brackets/quotes and splitting on commas, and a
+// plain string carrying JSON artifacts. Returns undefined when the value is
+// already a clean string needing no change.
+function repairPathList(value: unknown): string | undefined {
+  const clean = (parts: unknown[]): string =>
+    parts
+      .filter((el): el is string => typeof el === "string")
+      .map((el) => repairGlobPattern(el).trim())
+      .filter((el) => el.length > 0)
+      .join(";");
+
+  if (Array.isArray(value)) return clean(value);
+
   if (typeof value !== "string") return undefined;
   const s = value.trim();
-  if (!s.startsWith("[")) return undefined; // not an array-shaped string
-  const parsed = relaxedJson(s);
-  if (Array.isArray(parsed)) {
-    return parsed.map((el) => (typeof el === "string" ? repairGlobPattern(el) : el)) as string[];
+
+  if (s.startsWith("[")) {
+    const parsed = relaxedJson(s);
+    if (Array.isArray(parsed)) return clean(parsed);
+    // Malformed/truncated array string — salvage by stripping brackets/quotes
+    // and splitting on commas.
+    return clean(s.replace(/[[\]"']/g, "").split(","));
   }
-  // Malformed/truncated array string — salvage by stripping brackets/quotes
-  // and splitting on commas.
-  return s
-    .replace(/[[\]"']/g, "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter((x) => x.length > 0);
+
+  // A bare string: the model may still have comma-joined several paths, which
+  // omp would read as one literal glob. Only split when a comma is present AND
+  // no `;` already is, so an intentional `;` list is left alone and a filename
+  // legitimately containing a comma in a single-path call is not mangled.
+  if (s.includes(",") && !s.includes(";")) {
+    const fixed = clean(s.split(","));
+    return fixed === s ? undefined : fixed;
+  }
+
+  const fixed = repairGlobPattern(s);
+  return fixed === s ? undefined : fixed;
 }
 
 function relaxedJson(s: string): unknown | undefined {
@@ -107,26 +123,58 @@ function relaxedJson(s: string): unknown | undefined {
 // the tag. Body rows (`+…`) never start with `[`, so they can't match.
 const HASHLINE_HEADER = /^\s*\[+\s*(.*?)\s*#([0-9A-Fa-f]{4})\s*\]*\s*$/;
 
-// Op lines whose leading keyword may have been lowercased. Each keyword is
-// matched case-insensitively but only when followed by its expected operand
-// shape (a line number, or a colon for HEAD/TAIL), so a lowercase keyword in a
-// bare body line like `del 3 rows` is far less likely to be clobbered.
-const HASHLINE_OP_NUMBERED =
-  /^(\s*)(SWAP\.BLK|DEL\.BLK|INS\.BLK\.POST|INS\.PRE|INS\.POST|SWAP|DEL)(\s+[1-9].*)$/i;
-const HASHLINE_OP_HEADTAIL = /^(\s*)(INS\.HEAD|INS\.TAIL)(\s*:.*)$/i;
+// LEGACY DIALECT. omp 17.4.0 (hashline 17.4.0) replaced the SWAP/DEL/INS.*
+// ops with PUT/CUT/REM/MV. `grammar.lark` carries NO alias for the old
+// keywords, so a carried-over `SWAP 39.=39:` is a hard parse error, not a
+// warning. These rules translate each old keyword+operand shape into the
+// current form; a trailing colon is preserved so the CUT/PUT colon rules
+// below can still sort out delete-vs-replace.
+const LEGACY_OPS: { re: RegExp; to: (m: RegExpMatchArray) => string; fix: string }[] = [
+  { re: /^(\s*)INS\.BLK\.POST(\s+)([1-9]\d*)\s*:(.*)$/i,
+    to: m => `${m[1]}PUT >${m[3]}*:${m[4]}`, fix: "ins.blk.post→put" },
+  { re: /^(\s*)INS\.PRE(\s+)([1-9]\d*)\s*:(.*)$/i,
+    to: m => `${m[1]}PUT <${m[3]}:${m[4]}`, fix: "ins.pre→put" },
+  { re: /^(\s*)INS\.POST(\s+)([1-9]\d*)\s*:(.*)$/i,
+    to: m => `${m[1]}PUT >${m[3]}:${m[4]}`, fix: "ins.post→put" },
+  { re: /^(\s*)INS\.HEAD\s*:(.*)$/i, to: m => `${m[1]}PUT <1:${m[2]}`, fix: "ins.head→put" },
+  { re: /^(\s*)INS\.TAIL\s*:(.*)$/i, to: m => `${m[1]}PUT >$:${m[2]}`, fix: "ins.tail→put" },
+  { re: /^(\s*)SWAP\.BLK(\s+)([1-9]\d*)\s*:(.*)$/i,
+    to: m => `${m[1]}PUT ${m[3]}*:${m[4]}`, fix: "swap.blk→put" },
+  { re: /^(\s*)DEL\.BLK(\s+)([1-9]\d*)\s*(:?)\s*$/i,
+    to: m => `${m[1]}CUT ${m[3]}*${m[4]}`, fix: "del.blk→cut" },
+  { re: /^(\s*)SWAP(\s+[<>1-9].*)$/i, to: m => `${m[1]}PUT${m[2]}`, fix: "swap→put" },
+  { re: /^(\s*)DEL(\s+[<>1-9].*)$/i, to: m => `${m[1]}CUT${m[2]}`, fix: "del→cut" },
+];
+
+// Current-dialect op lines whose leading keyword may have been lowercased.
+// Matched case-insensitively but only when followed by the expected operand
+// shape, so a lowercase keyword in a bare body line is far less likely to be
+// clobbered. Body rows start with `+` and never match any of these.
+const HASHLINE_OP_PUTCUT = /^(\s*)(PUT|CUT)(\s+[<>1-9].*)$/i;
+const HASHLINE_OP_REM = /^(\s*)(REM)(\s*)$/i;
+const HASHLINE_OP_MV = /^(\s*)(MV)(\s+\S.*)$/i;
+
+// A locator with no register and no trailing colon: `39.=41`, `12*`, `<7`,
+// `>7`, `>7*`, `>$`. Used to spot a `PUT` that dropped its colon.
+const PUT_LOCATOR = /(?:[1-9]\d*\.=[1-9]\d*|[1-9]\d*\*|<[1-9]\d*|>[1-9]\d*\*?|>\$)/;
+const PUT_MISSING_COLON = new RegExp(`^(\\s*)PUT(\\s+)(${PUT_LOCATOR.source})\\s*$`);
+const REGISTER_PASTE = /^(\s*)(PUT|CUT)(\s+\S.*\s@[A-Za-z0-9_-]+):\s*$/;
 
 // Repair the most common hashline syntax mistakes small models make in an
 // `edit` patch. Applied per line:
 //   1. Header: normalize `[[PATH#TAG]` / `[PATH#TAG]]` / `[PATH#TAG` / `#a2a9`
 //      (lowercase tag) to the canonical `[PATH#TAG]` with an uppercase tag.
-//   2. Op keyword case: `swap`/`del`/`ins.post` → `SWAP`/`DEL`/`INS.POST`.
-//   2b. Range separator: read ranges are `N-M`, edit ranges are `N.=M`. Models
-//      carry the read form into a hunk header (`SWAP 560-571:`), which won't
+//   2. Legacy dialect: SWAP/DEL/INS.* → PUT/CUT (see LEGACY_OPS).
+//   3. Op keyword case: `put`/`cut`/`rem`/`mv` → uppercase.
+//   3b. Range separator: read ranges are `N-M`, edit ranges are `N.=M`. Models
+//      carry the read form into a hunk header (`PUT 560-571:`), which won't
 //      parse → "payload line has no preceding hunk header". Convert `-` → `.=`.
-//   3. DEL/SWAP confusion: a `DEL` has NO colon and NO body; `SWAP` has both.
-//      Models write `DEL N.=M:` + `+body` when they mean REPLACE — that's a SWAP.
-//        - DEL header ending in `:` WITH `+body` after it → convert to SWAP
-//        - DEL header ending in `:` WITHOUT body          → strip the stray colon
+//   4. CUT/PUT confusion: a `CUT` has NO colon and NO body; a `PUT` range op
+//      has both. Models write `CUT N.=M:` + `+body` when they mean REPLACE.
+//        - CUT header ending in `:` WITH `+body` after it → convert to PUT
+//        - CUT header ending in `:` WITHOUT body          → strip the stray colon
+//        - PUT locator with NO colon but `+body` after it → add the colon
+//        - register paste (`PUT >40 @fn`) is bodyless     → strip a stray colon
 export function repairHashlinePatch(patch: string): { patch: string; fixes: string[] } {
   const lines = patch.split("\n");
   const fixes: string[] = [];
@@ -144,32 +192,60 @@ export function repairHashlinePatch(patch: string): { patch: string; fixes: stri
       continue;
     }
 
-    // 2. Op keyword case-normalization.
-    const op = lines[i].match(HASHLINE_OP_NUMBERED) ?? lines[i].match(HASHLINE_OP_HEADTAIL);
+    // 2. Legacy op keywords → current dialect.
+    for (const rule of LEGACY_OPS) {
+      const m = lines[i].match(rule.re);
+      if (!m) continue;
+      lines[i] = rule.to(m);
+      fixes.push(rule.fix);
+      break;
+    }
+
+    // 3. Op keyword case-normalization.
+    const op = lines[i].match(HASHLINE_OP_PUTCUT)
+      ?? lines[i].match(HASHLINE_OP_REM)
+      ?? lines[i].match(HASHLINE_OP_MV);
     if (op && op[2] !== op[2].toUpperCase()) {
       lines[i] = `${op[1]}${op[2].toUpperCase()}${op[3]}`;
       fixes.push("op-keyword-uppercase");
     }
 
-    // 2b. Range separator: `SWAP 560-571:` / `DEL 8-10` → `.=` form. Only the
-    //     concrete SWAP/DEL ops take a range; `.BLK`/`INS` forms don't (a `-`
-    //     after `SWAP`/`DEL` + whitespace is unambiguously a mis-typed range).
-    const rng = lines[i].match(/^(\s*)(SWAP|DEL)(\s+)(\d+)-(\d+)(.*)$/);
+    // 3b. Range separator: `PUT 560-571:` / `CUT 8-10` → `.=` form. Gap and
+    //     block locators start with `<`/`>` or end in `*`, so a bare `N-M`
+    //     after `PUT`/`CUT` is unambiguously a mis-typed range.
+    const rng = lines[i].match(/^(\s*)(PUT|CUT)(\s+)(\d+)-(\d+)(.*)$/);
     if (rng) {
       lines[i] = `${rng[1]}${rng[2]}${rng[3]}${rng[4]}.=${rng[5]}${rng[6]}`;
       fixes.push("range-sep-fix");
     }
 
-    // 3. DEL-with-body → SWAP, or strip a stray trailing colon from a bodyless DEL.
-    const m = lines[i].match(/^(\s*)(DEL(?:\.BLK)?)(\s+\S.*?):\s*$/);
-    if (!m) continue;
     const hasBody = /^\s*\+/.test(lines[i + 1] ?? "");
+
+    // 4a. A register paste takes no body — drop a stray trailing colon.
+    const reg = lines[i].match(REGISTER_PASTE);
+    if (reg && !hasBody) {
+      lines[i] = `${reg[1]}${reg[2]}${reg[3]}`;
+      fixes.push("register-strip-colon");
+      continue;
+    }
+
+    // 4b. A `PUT` locator that lost its colon but has body rows under it.
+    const noColon = lines[i].match(PUT_MISSING_COLON);
+    if (noColon && hasBody) {
+      lines[i] = `${noColon[1]}PUT${noColon[2]}${noColon[3]}:`;
+      fixes.push("put-add-colon");
+      continue;
+    }
+
+    // 4c. CUT-with-body → PUT, or strip a stray trailing colon from a CUT.
+    const m = lines[i].match(/^(\s*)CUT(\s+\S.*?):\s*$/);
+    if (!m) continue;
     if (hasBody) {
-      lines[i] = `${m[1]}${m[2].replace(/^DEL/, "SWAP")}${m[3]}:`;
-      fixes.push("del-with-body→swap");
+      lines[i] = `${m[1]}PUT${m[2]}:`;
+      fixes.push("cut-with-body→put");
     } else {
-      lines[i] = `${m[1]}${m[2]}${m[3]}`; // strip the stray trailing colon
-      fixes.push("del-strip-colon");
+      lines[i] = `${m[1]}CUT${m[2]}`; // strip the stray trailing colon
+      fixes.push("cut-strip-colon");
     }
   }
   return { patch: lines.join("\n"), fixes };
@@ -287,7 +363,12 @@ export function repairArgs(
     for (const [bad, good] of Object.entries(spec.argAliases)) {
       const lower = bad.toLowerCase();
       for (const k of Object.keys(input)) {
-        if (k.toLowerCase() === lower && k !== good && !(good in input)) {
+        // Treat a present-but-null/undefined canonical key as absent: models
+        // (and upstream JSON repair) emit `{"pattern":"**/*.go","path":null}`,
+        // and `good in input` alone would refuse the alias and leave the value
+        // stranded on the wrong key.
+        const canonicalEmpty = input[good] === undefined || input[good] === null;
+        if (k.toLowerCase() === lower && k !== good && canonicalEmpty) {
           input[good] = input[k];
           delete input[k];
           report.aliased.push(`${k}→${good}`);
@@ -349,18 +430,8 @@ export function repairArgs(
     }
   }
 
-  const globArg = GLOB_PATTERN_ARGS[spec.canonical];
-  if (globArg && typeof input[globArg] === "string") {
-    const before = input[globArg] as string;
-    const after = repairGlobPattern(before);
-    if (after !== before) {
-      input[globArg] = after;
-      report.coerced.push(`${globArg}:glob-array`);
-    }
-  }
-
-  // 4b. Repair common hashline op-syntax mistakes in an `edit` patch (DEL used
-  //     where SWAP was meant, or a DEL with a stray trailing colon).
+  // 4b. Repair common hashline op-syntax mistakes in an `edit` patch (the dead
+  //     SWAP/DEL/INS.* dialect, CUT used where PUT was meant, stray colons).
   if (spec.canonical === "edit" && typeof input.input === "string") {
     const { patch, fixes } = repairHashlinePatch(input.input);
     if (fixes.length) {
@@ -369,14 +440,31 @@ export function repairArgs(
     }
   }
 
-  // 5. Repair ARRAY-of-globs args (e.g. search.paths) that the model serialized
-  //    as a JSON-stringified array, or as a malformed/truncated array string.
-  const globArrayArg = GLOB_ARRAY_ARGS[spec.canonical];
-  if (globArrayArg && globArrayArg in input) {
-    const fixed = repairGlobArray(input[globArrayArg]);
+  // 5. Repair the path-scope arg of `grep`/`glob`, which omp takes as ONE
+  //    `;`-delimited string, when the model sent an array, a stringified
+  //    array, or a comma-joined list.
+  const pathListArg = PATH_LIST_ARGS[spec.canonical];
+  if (pathListArg && pathListArg in input) {
+    const fixed = repairPathList(input[pathListArg]);
     if (fixed !== undefined) {
-      input[globArrayArg] = fixed;
-      report.coerced.push(`${globArrayArg}:glob-array[]`);
+      input[pathListArg] = fixed;
+      report.coerced.push(`${pathListArg}:path-list`);
+    }
+  }
+
+  // 6. Translate a stray ignore-case flag onto omp's `case`, negating it:
+  //    `case` means case-SENSITIVE, the opposite of the `i` it replaced.
+  if (spec.canonical === "grep" && !("case" in input)) {
+    for (const key of IGNORE_CASE_KEYS) {
+      if (!(key in input)) continue;
+      const v = input[key];
+      const b = typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : undefined;
+      if (b !== undefined) {
+        input.case = !b;
+        report.coerced.push(`${key}→case:negated`);
+      }
+      delete input[key];
+      break;
     }
   }
 

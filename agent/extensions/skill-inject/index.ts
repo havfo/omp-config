@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,10 +48,12 @@ const INTENT_MAP: Record<string, string[]> = {
   run: ["Bash"], execute: ["Bash"], install: ["Bash"],
   build: ["Bash"], test: ["Bash"],
   // Skills are keyed by target_tool, matched against displayName(toolName) —
-  // so `search` → "Search", carried by search.md. Only intents with a matching
-  // skills/tools/*.md doc are listed.
-  find: ["Search"], search: ["Search"], grep: ["Search"],
-  agent: ["Agent"], delegate: ["Agent"], spawn: ["Agent"],
+  // so `grep` → "Grep", carried by grep.md. Only intents with a matching
+  // skills/tools/*.md doc are listed. (`search`/`find` were renamed to
+  // `grep`/`glob` in omp 16.2.x; the old "Search" and "Agent" entries pointed
+  // at skills that no longer exist and selected nothing.)
+  grep: ["Grep"], search: ["Grep"], match: ["Grep"],
+  glob: ["Glob"], find: ["Glob"], list: ["Glob"], files: ["Glob"],
 };
 
 // Resolve the skills/ root robustly. The extension was relocated from
@@ -247,7 +249,14 @@ export default function (pi: ExtensionAPI) {
       if (sessionStableBlock === undefined) {
         // Generous cap: the block is injected once, so its tokens are a
         // one-time prefix cost, and we want the full core guidance present.
-        const selected = stableSelect(Math.max(budget, 2000), allowed);
+        //
+        // The cap must clear the SUM of the core cards' real `token_cost`
+        // (~3.2k for the six tools/*.md), or stableSelect silently drops the
+        // ones that don't fit — and because it sorts by name, the casualties
+        // are the tail (Grep/Read/Write), not the least useful. Those costs
+        // were understated ~2x until they were measured, which is why 2000
+        // appeared to be enough while the block was really ~3.2k.
+        const selected = stableSelect(Math.max(budget, 4000), allowed);
         sessionStableBlock = selected.length ? buildBlock(selected) : "";
         label = `skill-inject: stable +${selected.length} [${selected.map((s) => s.targetTool).join(",")}]`;
       } else {

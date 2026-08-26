@@ -56,16 +56,38 @@ export function collectErrors(tree: any): SyntaxDiagnostic[] {
 }
 
 /**
+ * How many diagnostics are worth showing. A single unbalanced brace makes
+ * tree-sitter re-interpret everything after it, so errors 4..20 are almost
+ * always cascade from the first — and they point at lines that are perfectly
+ * fine, which is what makes the whole warning read as wrong.
+ */
+export const MAX_LISTED_DIAGNOSTICS = 3;
+
+/**
  * Format diagnostics into a compact string for the model.
  * Each diagnostic is one line: `L{line}:{col} {type}: {message} [{text}]`
+ *
+ * Only the first `limit` are listed; the rest are summarised as cascade, since
+ * quoting them invites the model to "fix" untouched lines.
  */
-export function formatDiagnostics(diags: SyntaxDiagnostic[]): string {
+export function formatDiagnostics(
+  diags: SyntaxDiagnostic[],
+  limit = MAX_LISTED_DIAGNOSTICS,
+): string {
   if (diags.length === 0) return "";
-  const lines = diags.map((d) => {
+  const shown = diags.slice(0, Math.max(1, limit));
+  const lines = shown.map((d) => {
     const loc = `L${d.line}:${d.column}`;
     const text = d.text ? ` [${d.text}]` : "";
     return `  ${loc} ${d.type}: ${d.message}${text}`;
   });
+  const hidden = diags.length - shown.length;
+  if (hidden > 0) {
+    lines.push(
+      `  …and ${hidden} more, almost certainly cascade from the first — ` +
+      `fix the earliest one and re-check before touching the others.`,
+    );
+  }
   return lines.join("\n");
 }
 

@@ -1,8 +1,9 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { isFileReadTool, isFileWriteTool, pathArgOf } from "../_shared/taxonomy.ts";
+import { stripReadSelector } from "../_shared/paths.ts";
 
 // Preflight Read/Edit/Write paths. Only block on signals that the path is a
 // genuine guess: a syntactic placeholder, or a resolved path that doesn't
@@ -22,32 +23,6 @@ function expandTilde(p: string): string {
   if (p === "~") return homedir();
   if (p.startsWith("~/")) return homedir() + p.slice(1);
   return p;
-}
-
-// pi's Read tool accepts a line-range selector appended to the path, e.g.
-// `gcc.go:182-376`, `file.ts:1-50,100-120`, `file.go:L10`, `:raw`, `:conflicts`
-// (grammar mirrored from pi's tools/path-utils.ts). The selector is NOT part
-// of the filename, so we must strip it before existence-checking — otherwise
-// every ranged read is blocked as "file does not exist", which is exactly the
-// failure mode that sent the model into a retry spiral.
-const RANGE_CHUNK = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
-const RANGE_LIST = `${RANGE_CHUNK}(?:,${RANGE_CHUNK})*`;
-const READ_SELECTOR_TAIL = new RegExp(`:(?:${RANGE_LIST}|raw|conflicts)$`, "i");
-
-// A hashline snapshot tag the model may have appended to a read path:
-// `#XXXX` (always a tag) or `:XXXX` where XXXX is 4 hex containing a letter
-// (a line range is digits, optionally L-prefixed). Stripped before the
-// existence check so a tag-bearing read isn't wrongly blocked as "missing".
-function stripHashlineTag(p: string): string {
-  const hashForm = p.replace(/#[0-9a-fA-F]{4}$/, "");
-  if (hashForm !== p) return hashForm;
-  const m = p.match(/^(.*):([0-9a-fA-F]{4})$/);
-  if (m && /[a-fA-F]/.test(m[2]) && !/^L/i.test(m[2])) return m[1];
-  return p;
-}
-
-function stripReadSelector(p: string): string {
-  return stripHashlineTag(p).replace(READ_SELECTOR_TAIL, "");
 }
 
 // pi's `read` (and `write`) now accept non-filesystem targets: web URLs
@@ -80,7 +55,7 @@ export function evaluatePath(
       const base = raw.split("/").pop() ?? raw;
       return { ok: false, reason:
         `File does not exist: "${raw}"${raw === p ? "" : ` (resolved to ${p})`}. ` +
-        `Use Glob to find the real path: {"name":"Glob","input":{"pattern":"**/${stripReadSelector(base)}"}}.` };
+        `Use glob to find the real path: {"name":"glob","input":{"path":"**/${stripReadSelector(base)}"}}.` };
     }
   }
   return { ok: true };

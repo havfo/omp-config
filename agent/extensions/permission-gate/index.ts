@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { tmpdir } from "node:os";
 
 // Bash commands not matching the whitelist are blocked in "auto" mode. In
@@ -9,11 +9,12 @@ const SAFE_PREFIXES: readonly string[] = [
   // Navigation: harmless on its own; a destructive *following* segment is
   // caught by the per-segment check, so `cd /x && pytest` works but
   // `cd /x && rm -rf` does not. Also restores ShellSession's persistent cwd.
-  "cd ",
+  "cd ", "sleep", "for", "while", "do", "done",
   "ls", "cat", "head", "tail", "wc", "pwd", "echo", "printf", "date",
-  "which", "type", "env", "printenv", "uname", "whoami", "id",
+  "which", "type", "env", "printenv", "uname", "whoami", "id", "xargs",
   "git log", "git status", "git diff", "git show", "git branch",
   "git remote", "git stash list", "git tag",
+  "curl", "wget", "netcat", "nc", "netstat", "ping", "ping6", "traceroute", "traceroute6",
   "find ", "grep ", "rg ", "ag ", "fd ",
   "python ", "python3 ", "node ", "ruby ", "perl ",
   // npm/pnpm/yarn/bun run/test/list subcommands.
@@ -157,22 +158,24 @@ function getPermissionMode(): "auto" | "accept-all" | "manual" {
   return "auto";
 }
 
-// Hints for commands the model commonly reaches for that don't work in
-// pi's stateless bash. These are MORE useful than a fuzzy prefix match
-// because the right answer is usually "use a different tool entirely",
-// not "use a similarly-spelled bash command".
+// Hints for commands the model commonly reaches for that don't work here.
+// These are MORE useful than a fuzzy prefix match because the right answer is
+// usually "use a different tool entirely", not "use a similarly-spelled bash
+// command".
 const INTENT_HINTS: Record<string, string> = {
-  cd:    "Bash is stateless — `cd` does not persist between calls. Chain with && (e.g. `cd /path && ls`) or pass absolute paths to subsequent calls.",
-  rm:    "Destructive ops are not whitelisted. Ask the user, or use a tool that doesn't need rm (Edit to clear file content, Write to overwrite a missing file).",
-  mv:    "`mv` is not whitelisted. Read the source, Write to the destination, then ask the user to clean up the original.",
+  // omp 17.4.0 runs a PERSISTENT shell and `bash` takes a `cwd` argument, so
+  // the old "bash is stateless, chain with &&" advice was wrong on both counts.
+  cd:    "Don't `cd` — bash takes a `cwd` argument: {\"command\":\"go test ./...\",\"cwd\":\"/path\"}. For a one-off chain `cd /path && make` also works.",
+  rm:    "Destructive ops are not whitelisted. To delete a FILE use a hashline edit whose only op is `REM` under the [PATH#TAG] header. Anything else: ask the user.",
+  mv:    "`mv` is not whitelisted. To rename/move a file use a hashline edit ending in `MV <new path>` under its [PATH#TAG] header.",
   cp:    "`cp` is not whitelisted. Use Read + Write instead.",
   sudo:  "The harness cannot sudo. Pick a path that doesn't require elevated permissions.",
   vim:   "Interactive editors aren't supported. Use Edit to change files in place.",
   vi:    "Interactive editors aren't supported. Use Edit to change files in place.",
   nano:  "Interactive editors aren't supported. Use Edit to change files in place.",
   open:  "GUI launchers aren't supported in this harness.",
-  source:"`source` and shell-state ops don't persist. Inline the env: `VAR=val command ...`.",
-  export:"Env vars don't persist between bash calls. Inline them on the same command line.",
+  source:"`source` isn't whitelisted. Pass what you need via bash's `env` argument: {\"command\":\"...\",\"env\":{\"NAME\":\"value\"}}.",
+  export:"`export` isn't whitelisted. Pass vars via bash's `env` argument: {\"command\":\"...\",\"env\":{\"NAME\":\"value\"}}.",
   kill:  "Process management isn't whitelisted. Ask the user.",
   apt:   "Package install isn't whitelisted. Ask the user to install dependencies.",
   brew:  "Package install isn't whitelisted. Ask the user to install dependencies.",
@@ -249,12 +252,27 @@ export default function (pi: ExtensionAPI) {
     const toolName = (event as any).toolName;
     const input: any = (event as any).input ?? (event as any).args;
 
-    // Gate bash-family tools AND the persistent ShellSession tool — otherwise
-    // the whitelist is trivially bypassed by routing commands through
-    // ShellSession (same `command` arg). pi has its own confirmation flow for
-    // destructive edits via the TUI.
-    if (toolName === "bash" || toolName === "Bash" || toolName === "ShellSession") {
-      const cmd = input?.command;
+    // Gate bash-family tools AND `hub`'s process-launch ops — otherwise the
+    // whitelist is trivially bypassed by routing a command through
+    // `hub {op:"start", application, args}`, which is exactly the old `launch`
+    // tool (v17.0.0 merged irc/job/launch into `hub`; the `ShellSession` tool
+    // this branch used to name no longer exists). omp tiers those ops as
+    // `exec`, but the default approvalMode is `yolo`, so nothing prompts.
+    // pi has its own confirmation flow for destructive edits via the TUI.
+    const isBash = toolName === "bash" || toolName === "Bash";
+    const isHubLaunch = (toolName === "hub" || toolName === "Hub")
+      && (input?.op === "start" || input?.op === "restart");
+
+    if (isBash || isHubLaunch) {
+      // `hub` carries the command as {application, args[]} rather than one
+      // shell string; join it so the same whitelist and per-segment checks
+      // apply. Nothing is shell-parsed on that path, so a joined string is a
+      // conservative over-approximation, which is the right direction here.
+      const cmd = isHubLaunch
+        ? [input?.application, ...(Array.isArray(input?.args) ? input.args : [])]
+            .filter((x) => typeof x === "string" && x.length > 0)
+            .join(" ")
+        : input?.command;
       if (typeof cmd === "string") {
         const bad = firstUnsafeSegment(cmd);
         if (bad !== null) {
