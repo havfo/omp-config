@@ -127,6 +127,28 @@ export function pickNoopHint(errorText: string): string | undefined {
   return undefined;
 }
 
+// A bash/eval call that exceeded the auto-background threshold returns
+// "Backgrounded as job N; result will be delivered automatically." with
+// isError=false. Small local models read that as "nothing happened yet" and
+// start burning turns waiting — `sleep 30`, poll loops, or a long silent think.
+// The delivery is push-based (an async-result <system-notice> re-invokes the
+// agent with the full output), so the only correct moves are: do independent
+// work, or end the turn. Say so inline, where it is unmissable.
+const BACKGROUND_TOOLS = new Set(["bash", "eval"]);
+const BACKGROUND_RE = /Backgrounded as job\s+(\S+?);/i;
+
+export function pickBackgroundHint(toolName: string, text: string): string | undefined {
+  if (!BACKGROUND_TOOLS.has(toolName?.toLowerCase() ?? "")) return undefined;
+  const m = BACKGROUND_RE.exec(text);
+  if (!m) return undefined;
+  const job = m[1];
+  return `Hint: job ${job} is still running and its result will be PUSHED to you when it settles — ` +
+    `you do not have to wait for it and you cannot speed it up. Do NOT sleep, poll, re-run the ` +
+    `command, or raise its timeout. Either do the next piece of work that does not depend on ` +
+    `job ${job}, or — if everything left depends on it — end your turn now with one line saying ` +
+    `you are waiting for job ${job}. You will be re-invoked with the output.`;
+}
+
 export function pickHint(toolName: string, errorText: string): string | undefined {
   const t = toolName?.toLowerCase() ?? "";
   for (const h of PER_TOOL_HINTS[t] ?? []) if (h.match.test(errorText)) return h.hint;
@@ -163,6 +185,12 @@ export default function (pi: ExtensionAPI) {
         const noopHint = pickNoopHint(text);
         if (noopHint) {
           return { content: [{ type: "text" as const, text: text + "\n\n" + noopHint }] };
+        }
+      }
+      if (typeof toolName === "string") {
+        const bgHint = pickBackgroundHint(toolName, text);
+        if (bgHint) {
+          return { content: [{ type: "text" as const, text: text + "\n\n" + bgHint }] };
         }
       }
       return;

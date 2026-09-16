@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pickHint, pickNoopHint } from "./index.ts";
+import { pickBackgroundHint, pickHint, pickNoopHint } from "./index.ts";
 
 describe("pickHint", () => {
   it("matches ENOENT to a Glob suggestion", () => {
@@ -141,5 +141,18 @@ describe("pickHint — omp 18.x hashline diagnostics", () => {
     expect(pickHint("edit",
       'apply_patch sentinel "*** Update File: a.go" is not valid in hashline.',
     )).toMatch(/different patch format/);
+  });
+});
+
+describe("pickBackgroundHint", () => {
+  it("coaches a backgrounded bash job to not wait", () => {
+    const h = pickBackgroundHint("bash", "Backgrounded as job bash-7; result will be delivered automatically.");
+    expect(h).toMatch(/bash-7/);
+    expect(h).toMatch(/Do NOT sleep/);
+    expect(h).toMatch(/end your turn/);
+  });
+  it("ignores ordinary output and other tools", () => {
+    expect(pickBackgroundHint("bash", "ok\n2 passed")).toBeUndefined();
+    expect(pickBackgroundHint("read", "Backgrounded as job x; result will be delivered automatically.")).toBeUndefined();
   });
 });

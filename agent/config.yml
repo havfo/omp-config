@@ -1,49 +1,51 @@
 symbolPreset: nerd
-theme: 
+theme:
   dark: titanium
 setupVersion: 2
-modelRoles: 
+modelRoles:
   default: llama.cpp//run/media/havfo/Data/ai/llm/Qwen3.8-27B-UD-Q4_K_XL.gguf
-compaction: 
+compaction:
   asyncEnabled: false
   supersedeReads: false
   dropUseless: false
-  methodOrder: 
+  methodOrder:
     - remote
     - soft
   idleEnabled: false
-memory: 
+memory:
   backend: "off"
-providers: 
-  webSearchOrder: 
+providers:
+  webSearchOrder:
     - kagi
     - brave
     - duckduckgo
     - gemini
     - google
-tools: 
+tools:
   {}
-skills: 
+skills:
   enabled: false
-disabledExtensions: 
+disabledExtensions:
   []
-astGrep: 
+astGrep:
   enabled: false
-task: 
+task:
   maxConcurrency: 1
   enableLsp: true
   maxRecursionDepth: 0
 proseOnlyThinking: false
-defaultThinkingLevel: medium
-title: 
+defaultThinkingLevel: xhigh
+title:
   refreshOnReplan: false
-tui: 
+tui:
   titleState: false
-composer: 
+composer:
   shape: box
-recap: 
+recap:
   enabled: false
-goal: 
+goal:
   statusInFooter: false
-dev: 
+dev:
   autoqaConsent: granted
+provider:
+  appendOnlyContext: "on"

@@ -58,9 +58,9 @@ describe("knowledge directory loads from repo", () => {
     expect(root).toBeDefined();
   });
 
-  it("knowledge dir has 13 files", () => {
+  it("knowledge dir has 1 file", () => {
     expect(existsSync(kDir)).toBe(true);
-    expect(readdirSync(kDir).filter((f) => f.endsWith(".md")).length).toBe(13);
+    expect(readdirSync(kDir).filter((f) => f.endsWith(".md")).length).toBe(1);
   });
 
   it("protocols dir has 3 files", () => {

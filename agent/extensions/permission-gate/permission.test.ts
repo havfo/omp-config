@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isSafeBash, buildBlockReason } from "./index.ts";
+import { isSafeBash, buildBlockReason, isWaitOnlyBash } from "./index.ts";
 
 describe("isSafeBash", () => {
   it("allows whitelisted read-only commands", () => {
@@ -109,5 +109,21 @@ describe("buildBlockReason", () => {
   it("suggests the exact match when the subcommand is whitelisted at 2 tokens", () => {
     // A typo'd flag on an allowed subcommand still resolves to that subcommand.
     expect(buildBlockReason("git push origin main", "auto")).toMatch(/git/);
+  });
+});
+
+describe("isWaitOnlyBash", () => {
+  it("blocks commands that only wait", () => {
+    expect(isWaitOnlyBash("sleep 30")).toBe(true);
+    expect(isWaitOnlyBash("sleep 5; sleep 5")).toBe(true);
+    expect(isWaitOnlyBash("wait")).toBe(true);
+    expect(isWaitOnlyBash("while true; do sleep 5; done")).toBe(true);
+    expect(isWaitOnlyBash("echo waiting; sleep 10; echo done")).toBe(true);
+  });
+  it("allows a sleep paired with work that produces a fact", () => {
+    expect(isWaitOnlyBash("sleep 2 && curl -s localhost:8080/health")).toBe(false);
+    expect(isWaitOnlyBash("go test ./...")).toBe(false);
+    expect(isWaitOnlyBash("echo hi")).toBe(false); // no wait segment at all
+    expect(isWaitOnlyBash("")).toBe(false);
   });
 });

@@ -152,6 +152,51 @@ export function isSafeBash(command: string): boolean {
   return firstUnsafeSegment(command) === null;
 }
 
+// ── Anti-stall: bash calls that do nothing but wait ─────────────────────
+// omp auto-backgrounds a long command (~60s) and PUSHES the result back as an
+// async-result <system-notice>. Local models routinely miss that and try to
+// wait out the job by hand — `sleep 30`, `while true; do sleep 5; done` — which
+// burns a full turn (plus a prefill) and delivers nothing. Blocking the
+// wait-only shape is the only feedback that reliably lands.
+//
+// Deliberately narrow: only a command whose EVERY segment is a no-op/wait is
+// blocked. A readiness probe (`sleep 2 && curl localhost:8080/health`) still
+// runs, because there the sleep is paired with work that produces a fact.
+const WAIT_HEADS = new Set(["sleep", "wait", "true", ":"]);
+const FILLER_HEADS = new Set(["echo", "printf", "date", "false"]);
+// Shell keywords that wrap a segment without changing what it runs; stripped so
+// `while true; do sleep 1; done` classifies on `true` / `sleep 1`.
+const LOOP_KEYWORDS = new Set(["while", "until", "for", "do", "done", "then", "fi", "else"]);
+
+function stripLoopKeywords(seg: string): string {
+  let toks = seg.trim().split(/\s+/);
+  while (toks.length > 0 && LOOP_KEYWORDS.has(toks[0])) toks = toks.slice(1);
+  return toks.join(" ");
+}
+
+export function isWaitOnlyBash(command: string): boolean {
+  const segs = splitSegments(command.trim());
+  if (segs.length === 0) return false;
+  let sawWait = false;
+  for (const raw of segs) {
+    const seg = stripLoopKeywords(raw);
+    if (!seg) continue; // bare `done`/`fi`
+    const head = seg.split(/\s+/)[0] ?? "";
+    if (WAIT_HEADS.has(head)) { sawWait = true; continue; }
+    if (FILLER_HEADS.has(head)) continue;
+    return false;
+  }
+  return sawWait;
+}
+
+export const WAIT_ONLY_REASON =
+  "anti-stall: this command only waits, so it cannot make progress. Background jobs " +
+  "deliver themselves — when the job settles you are re-invoked with a <system-notice> " +
+  "carrying its full output. Sleeping does not make that arrive sooner; it just spends a " +
+  "turn. Do the next piece of work that does not depend on the job, or end your turn with " +
+  "one line saying which job you are waiting for. (Need a settled job's output on demand? " +
+  "`hub jobs` / `hub wait`.)";
+
 function getPermissionMode(): "auto" | "accept-all" | "manual" {
   const v = process.env.OMPX_PERMISSION_MODE;
   if (v === "accept-all" || v === "manual") return v;
@@ -274,6 +319,12 @@ export default function (pi: ExtensionAPI) {
             .join(" ")
         : input?.command;
       if (typeof cmd === "string") {
+        // Checked before the whitelist: `sleep` IS whitelisted (it's harmless),
+        // so the wait-only shape would otherwise sail through unremarked.
+        if (isBash && isWaitOnlyBash(cmd)) {
+          try { ctx.ui.notify("permission-gate: blocked wait-only command (anti-stall)", "warning"); } catch {}
+          return { block: true, reason: WAIT_ONLY_REASON };
+        }
         const bad = firstUnsafeSegment(cmd);
         if (bad !== null) {
           const head = bad.trim().split(/\s+/)[0] ?? "";
