@@ -1,9 +1,11 @@
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { tmpdir } from "node:os";
 
-// Bash commands not matching the whitelist are blocked in "auto" mode. In
-// "accept-all" mode all commands pass. Write/Edit confirmations are deferred
-// to the TUI's own prompt; this only adds an extra guardrail on bash.
+// Bash commands not matching the whitelist are asked of the user for approval
+// in "auto"/"manual" mode. The dialog starts on "No" and its 30s timeout
+// applies the highlighted option, so silence still blocks. Headless runs with
+// no UI still block. Write/Edit confirmations are deferred to the TUI's own
+// prompt; this only adds an extra guardrail on bash.
 
 const SAFE_PREFIXES: readonly string[] = [
   // Navigation: harmless on its own; a destructive *following* segment is
@@ -289,6 +291,31 @@ export function buildBlockReason(cmd: string, mode: "auto" | "manual"): string {
   return `${prefix} "${head}" is not in SAFE_PREFIXES. ${tail}`;
 }
 
+// How long the approval dialog stays open before the highlighted option takes
+// effect. The cursor starts on "No", so a silent terminal still means
+// "blocked" — auto-reject after 30s without a reply.
+const APPROVAL_TIMEOUT_MS = 30 * 1000;
+
+// Ask the user whether to run a non-whitelisted command. The TUI confirm is a
+// Yes/No selector whose timeout applies the currently highlighted option, so
+// the cursor starts on "No": doing nothing for 30s rejects, while an explicit
+// move to "Yes" that times out approves. Any failure (no UI, dialog error)
+// resolves false, so the safe default remains "block".
+export async function askApproval(ctx: ExtensionContext, cmd: string, bad: string): Promise<boolean> {
+  if (!ctx.hasUI) return false;
+  const shown = cmd.trim();
+  const clipped = shown.length > 300 ? shown.slice(0, 300) + "…" : shown;
+  try {
+    return await ctx.ui.confirm(
+      "permission-gate: run non-whitelisted command?",
+      `"${bad.trim()}" is not on the bash whitelist.\n\nFull command:\n${clipped}\n\nRun it anyway? (cursor starts on No; timeout applies the highlighted option)`,
+      { timeout: APPROVAL_TIMEOUT_MS, initialIndex: 1 },
+    );
+  } catch {
+    return false;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     const mode = getPermissionMode();
@@ -327,6 +354,11 @@ export default function (pi: ExtensionAPI) {
         }
         const bad = firstUnsafeSegment(cmd);
         if (bad !== null) {
+          const reason = buildBlockReason(cmd, mode === "manual" ? "manual" : "auto");
+          if (await askApproval(ctx, cmd, bad)) {
+            try { ctx.ui.notify("permission-gate: approved non-whitelisted command", "info"); } catch {}
+            return; // user approved — let the tool run
+          }
           const head = bad.trim().split(/\s+/)[0] ?? "";
           try {
             const tag = hasCommandSubstitution(bad)
@@ -334,7 +366,7 @@ export default function (pi: ExtensionAPI) {
               : INTENT_HINTS[head] ? `(${INTENT_HINTS[head].split(".")[0]})` : "";
             ctx.ui.notify(`permission-gate: blocked "${head}" ${tag}`.trim(), "warning");
           } catch {}
-          return { block: true, reason: buildBlockReason(cmd, mode === "manual" ? "manual" : "auto") };
+          return { block: true, reason };
         }
       }
     }

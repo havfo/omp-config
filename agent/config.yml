@@ -3,7 +3,7 @@ theme:
   dark: titanium
 setupVersion: 2
 modelRoles:
-  default: llama.cpp//run/media/havfo/Data/ai/llm/Qwen3.8-27B-UD-Q4_K_XL.gguf
+  default: llama.cpp//run/media/havfo/Data/ai/llm/Qwen3.8-27B-UD3-Q4_K_XL.gguf
 compaction:
   asyncEnabled: false
   supersedeReads: false

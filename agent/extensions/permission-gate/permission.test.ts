@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { isSafeBash, buildBlockReason, isWaitOnlyBash } from "./index.ts";
+import { describe, it, expect, vi } from "vitest";
+import { isSafeBash, buildBlockReason, isWaitOnlyBash, askApproval } from "./index.ts";
+import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
 describe("isSafeBash", () => {
   it("allows whitelisted read-only commands", () => {
@@ -125,5 +126,38 @@ describe("isWaitOnlyBash", () => {
     expect(isWaitOnlyBash("go test ./...")).toBe(false);
     expect(isWaitOnlyBash("echo hi")).toBe(false); // no wait segment at all
     expect(isWaitOnlyBash("")).toBe(false);
+  });
+});
+
+describe("askApproval", () => {
+  const cmd = "rm -rf build/";
+  const bad = "rm -rf build/";
+  // askApproval only reads hasUI and ui.confirm; the full ExtensionContext
+  // surface is wide, so mocks are cast once at this boundary.
+  const makeCtx = (hasUI: boolean, confirm: (title: string, message: string, opts?: { timeout?: number }) => Promise<boolean>) =>
+    ({ hasUI, ui: { confirm } }) as unknown as ExtensionContext;
+
+  it("denies when no UI is available (headless stays a hard block)", async () => {
+    const confirm = vi.fn();
+    await expect(askApproval(makeCtx(false, confirm), cmd, bad)).resolves.toBe(false);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+  it("forwards the user's explicit choice", async () => {
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(true)), cmd, bad)).resolves.toBe(true);
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(false)), cmd, bad)).resolves.toBe(false);
+  });
+  it("denies when the dialog throws (safety default is block)", async () => {
+    await expect(
+      askApproval(makeCtx(true, vi.fn().mockRejectedValue(new Error("session ended"))), cmd, bad),
+    ).resolves.toBe(false);
+  });
+  it("shows the offending segment, starts the cursor on No, and times out at 30s", async () => {
+    const confirm = vi.fn().mockResolvedValue(false);
+    await askApproval(makeCtx(true, confirm), cmd, bad);
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringContaining("non-whitelisted"),
+      expect.stringContaining(bad),
+      expect.objectContaining({ timeout: 30_000, initialIndex: 1 }),
+    );
   });
 });
