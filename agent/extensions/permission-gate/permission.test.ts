@@ -2,6 +2,12 @@ import { describe, it, expect, vi } from "vitest";
 import { isSafeBash, buildBlockReason, isWaitOnlyBash, askApproval } from "./index.ts";
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
+// The approval notification rides the harness' pi-tui TERMINAL channel; mock
+// it so the best-effort dynamic import inside askApproval hits a known shape
+// (and stays observable) in the test environment.
+const { sendNotification } = vi.hoisted(() => ({ sendNotification: vi.fn() }));
+vi.mock("@oh-my-pi/pi-tui", () => ({ TERMINAL: { sendNotification } }));
+
 describe("isSafeBash", () => {
   it("allows whitelisted read-only commands", () => {
     expect(isSafeBash("ls -la")).toBe(true);
@@ -132,32 +138,62 @@ describe("isWaitOnlyBash", () => {
 describe("askApproval", () => {
   const cmd = "rm -rf build/";
   const bad = "rm -rf build/";
-  // askApproval only reads hasUI and ui.confirm; the full ExtensionContext
-  // surface is wide, so mocks are cast once at this boundary.
-  const makeCtx = (hasUI: boolean, confirm: (title: string, message: string, opts?: { timeout?: number }) => Promise<boolean>) =>
-    ({ hasUI, ui: { confirm } }) as unknown as ExtensionContext;
+  // askApproval reads hasUI, ui.select, and (optionally) ui.theme; the full
+  // ExtensionContext surface is wide, so mocks are cast once at this boundary.
+  const makeCtx = (
+    hasUI: boolean,
+    select: (
+      title: string,
+      options: Array<{ label: string; description: string }>,
+      opts?: { timeout?: number; initialIndex?: number },
+    ) => Promise<string | undefined>,
+  ) => ({ hasUI, ui: { select } }) as unknown as ExtensionContext;
 
   it("denies when no UI is available (headless stays a hard block)", async () => {
-    const confirm = vi.fn();
-    await expect(askApproval(makeCtx(false, confirm), cmd, bad)).resolves.toBe(false);
-    expect(confirm).not.toHaveBeenCalled();
+    const select = vi.fn();
+    await expect(askApproval(makeCtx(false, select), cmd, bad)).resolves.toBe(false);
+    expect(select).not.toHaveBeenCalled();
+    expect(sendNotification).not.toHaveBeenCalled();
   });
   it("forwards the user's explicit choice", async () => {
-    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(true)), cmd, bad)).resolves.toBe(true);
-    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(false)), cmd, bad)).resolves.toBe(false);
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue("**Yes** — run it")), cmd, bad)).resolves.toBe(true);
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue("**No** — block it")), cmd, bad)).resolves.toBe(false);
+    // Esc / cancel (undefined) is a block too.
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(undefined)), cmd, bad)).resolves.toBe(false);
   });
   it("denies when the dialog throws (safety default is block)", async () => {
     await expect(
       askApproval(makeCtx(true, vi.fn().mockRejectedValue(new Error("session ended"))), cmd, bad),
     ).resolves.toBe(false);
   });
-  it("shows the offending segment, starts the cursor on No, and times out at 30s", async () => {
-    const confirm = vi.fn().mockResolvedValue(false);
-    await askApproval(makeCtx(true, confirm), cmd, bad);
-    expect(confirm).toHaveBeenCalledWith(
-      expect.stringContaining("non-whitelisted"),
-      expect.stringContaining(bad),
-      expect.objectContaining({ timeout: 30_000, initialIndex: 1 }),
-    );
+  it("shows the FULL command (no truncation), starts the cursor on No, and times out at 30s", async () => {
+    const longCmd = `curl -s "http://example.com/api?token=${"a".repeat(500)}" | grep secret`;
+    const select = vi.fn().mockResolvedValue(undefined);
+    await askApproval(makeCtx(true, select), longCmd, longCmd);
+    const [title, options, opts] = select.mock.calls[0] as unknown as [string, Array<{ label: string }>, { timeout?: number; initialIndex?: number }];
+    expect(title).toContain(longCmd); // the old 300-char clip is gone
+    expect(opts).toMatchObject({ timeout: 30_000, initialIndex: 1 });
+    expect(options.map((o) => o.label)).toEqual(["**Yes** — run it", "**No** — block it"]);
+  });
+  it("colors the command via the theme and dims the fine print", async () => {
+    const fg = (color: string, text: string) => `«${color}:${text}»`;
+    const select = vi.fn().mockResolvedValue(undefined);
+    const ctx = { hasUI: true, ui: { select, theme: { fg } } } as unknown as ExtensionContext;
+    await askApproval(ctx, cmd, bad);
+    const title = select.mock.calls[0][0] as string;
+    expect(title).toContain(`«warning:${bad}»`);
+    expect(title).toContain(`«warning:${cmd}»`);
+    expect(title).toContain("«dim:Run it anyway?");
+    expect(title.startsWith("permission-gate:")).toBe(true); // title line stays plain (countdown suffix lands there)
+  });
+  it("fires the work-done-shaped terminal notification when prompting", async () => {
+    sendNotification.mockClear();
+    await askApproval(makeCtx(true, vi.fn().mockResolvedValue(undefined)), cmd, bad);
+    expect(sendNotification).toHaveBeenCalledWith({
+      title: "Oh My Pi",
+      body: "Permission required",
+      type: "completion",
+      actions: "focus",
+    });
   });
 });

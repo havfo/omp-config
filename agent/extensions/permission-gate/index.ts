@@ -2,10 +2,15 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { tmpdir } from "node:os";
 
 // Bash commands not matching the whitelist are asked of the user for approval
-// in "auto"/"manual" mode. The dialog starts on "No" and its 30s timeout
-// applies the highlighted option, so silence still blocks. Headless runs with
-// no UI still block. Write/Edit confirmations are deferred to the TUI's own
-// prompt; this only adds an extra guardrail on bash.
+// in "auto"/"manual" mode. The dialog shows the FULL command (no truncation),
+// starts the cursor on "No", and its 30s timeout applies the highlighted
+// option — so silence still blocks, while any keypress restarts the countdown
+// (and the runner's handler-timeout budget is paused while a dialog is open),
+// giving an engaged user as long as they need. Showing the prompt also fires
+// the harness' "work done" terminal notification (desktop toast + bell) to
+// pull the user to the terminal. Headless runs with no UI still block.
+// Write/Edit confirmations are deferred to the TUI's own prompt; this only
+// adds an extra guardrail on bash.
 
 const SAFE_PREFIXES: readonly string[] = [
   // Navigation: harmless on its own; a destructive *following* segment is
@@ -261,8 +266,8 @@ export function buildBlockReason(cmd: string, mode: "auto" | "manual"): string {
   // for `cd /x && rm -rf` the problem is `rm`, not `cd`.
   const bad = (firstUnsafeSegment(cmd) ?? cmd).trim();
   const prefix = mode === "manual"
-    ? `manual permission mode: not pre-approved.`
-    : `bash whitelist: blocked.`;
+    ? `manual permission mode: not pre-approved, and the user did not approve at the prompt (no response or explicit No).`
+    : `bash whitelist: not whitelisted, and the user did not approve at the prompt (no response or explicit No).`;
 
   if (hasCommandSubstitution(bad)) {
     return `${prefix} Command substitution ($(...) or backticks) isn't allowed — ` +
@@ -293,24 +298,65 @@ export function buildBlockReason(cmd: string, mode: "auto" | "manual"): string {
 
 // How long the approval dialog stays open before the highlighted option takes
 // effect. The cursor starts on "No", so a silent terminal still means
-// "blocked" — auto-reject after 30s without a reply.
+// "blocked" — auto-reject after 30s without a reply. Any keypress (including
+// moving the cursor) restarts the countdown, so an engaged user is never cut
+// off by the timer.
 const APPROVAL_TIMEOUT_MS = 30 * 1000;
 
-// Ask the user whether to run a non-whitelisted command. The TUI confirm is a
+// The user has to be pulled to the terminal, so the prompt rides the same
+// channel as the harness' "work done" notice — TERMINAL.sendNotification with
+// the completion shape (desktop toast + bell, per the terminal's notify
+// protocol). The specifier is host-resolved by the extension loader; the
+// dynamic, guarded import means a resolution failure can never take the gate
+// itself down.
+async function sendApprovalNotification(): Promise<void> {
+  try {
+    const mod = await import("@oh-my-pi/pi-tui");
+    mod.TERMINAL?.sendNotification?.({
+      title: "Oh My Pi",
+      body: "Permission required",
+      type: "completion",
+      actions: "focus",
+    });
+  } catch {
+    // No notification surface — the on-screen dialog is the signal.
+  }
+}
+
+// Ask the user whether to run a non-whitelisted command. The TUI dialog is a
 // Yes/No selector whose timeout applies the currently highlighted option, so
 // the cursor starts on "No": doing nothing for 30s rejects, while an explicit
-// move to "Yes" that times out approves. Any failure (no UI, dialog error)
-// resolves false, so the safe default remains "block".
+// move to "Yes" that times out approves. The prompt shows the full command in
+// the warning color with the fine print dimmed, and the options carry
+// one-line descriptions (Yes/No bold, descriptions muted). Any failure (no
+// UI, dialog error, notification error) resolves false, so the safe default
+// remains "block".
 export async function askApproval(ctx: ExtensionContext, cmd: string, bad: string): Promise<boolean> {
   if (!ctx.hasUI) return false;
+  const theme = ctx.ui.theme as { fg?: (color: string, text: string) => string } | undefined;
+  const fg = (color: string, text: string): string => (theme?.fg ? theme.fg(color, text) : text);
   const shown = cmd.trim();
-  const clipped = shown.length > 300 ? shown.slice(0, 300) + "…" : shown;
+  const prompt = [
+    "permission-gate: run non-whitelisted command?",
+    fg("warning", `"${bad.trim()}" is not on the bash whitelist.`),
+    "",
+    fg("warning", shown),
+    "",
+    fg("dim", "Run it anyway? (cursor starts on No; any keypress restarts the 30s countdown; timeout applies the highlighted option)"),
+  ].join("\n");
+  await sendApprovalNotification();
+  const yesLabel = "**Yes** — run it";
+  const noLabel = "**No** — block it";
   try {
-    return await ctx.ui.confirm(
-      "permission-gate: run non-whitelisted command?",
-      `"${bad.trim()}" is not on the bash whitelist.\n\nFull command:\n${clipped}\n\nRun it anyway? (cursor starts on No; timeout applies the highlighted option)`,
+    const result = await ctx.ui.select(
+      prompt,
+      [
+        { label: yesLabel, description: "execute the command above" },
+        { label: noLabel, description: "keep it blocked (the model is told why)" },
+      ],
       { timeout: APPROVAL_TIMEOUT_MS, initialIndex: 1 },
     );
+    return result === yesLabel;
   } catch {
     return false;
   }

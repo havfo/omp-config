@@ -28,6 +28,11 @@ Gotchas not stated in the `bash` tool description:
   everything left depends on it, stop and end your turn with one line saying you are waiting
   for job N. Ending the turn is the CORRECT move — the job's completion wakes you back up,
   and no progress is lost. Do not keep thinking to fill the time.
+- PERMISSION GATE: a non-whitelisted command is NOT hard-blocked — it prompts the USER
+  for approval (a dialog with the full command). The prompt auto-rejects after 30s
+  without a response, and any explicit "No" rejects, so if the user is away or declines
+  the call comes back BLOCKED. Treat a gate block as "not approved": do not re-issue the
+  same command to re-trigger the prompt — take the alternative the block reason names.
 - BLOCKED by the permission gate: command substitution `$(...)`/backticks, `rm`/`mv`/`cp`,
   `sudo`, `apt`/`brew`, `source`/`export`, interactive editors, and redirects to anything but
   a scratch path (`> /tmp/...` is fine). Delete a file with a hashline `REM` op, rename with
