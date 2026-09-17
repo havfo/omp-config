@@ -13,49 +13,27 @@ import { tmpdir } from "node:os";
 // adds an extra guardrail on bash.
 
 const SAFE_PREFIXES: readonly string[] = [
-  // Navigation: harmless on its own; a destructive *following* segment is
-  // caught by the per-segment check, so `cd /x && pytest` works but
-  // `cd /x && rm -rf` does not. Also restores ShellSession's persistent cwd.
   "cd ", "sleep", "for", "while", "do", "done",
   "ls", "cat", "head", "tail", "wc", "pwd", "echo", "printf", "date",
-  "which", "type", "env", "printenv", "uname", "whoami", "id", "xargs",
+  "which", "type", "env", "printenv", "uname", "whoami", "id",
   "git log", "git status", "git diff", "git show", "git branch",
   "git remote", "git stash list", "git tag",
   "curl", "wget", "netcat", "nc", "netstat", "ping", "ping6", "traceroute", "traceroute6",
   "find ", "grep ", "rg ", "ag ", "fd ",
-  "python ", "python3 ", "node ", "ruby ", "perl ",
-  // npm/pnpm/yarn/bun run/test/list subcommands.
-  "npm test", "npm run", "npm ci", "npm ls", "npm list",
   "pip show", "pip list", "cargo metadata",
-  // Package installation (user-enabled). NOTE: install commands run arbitrary
-  // postinstall/build scripts and hit the network — this is a deliberate trust
-  // tradeoff. Command-substitution and out-of-scratch redirects are still
-  // blocked by the per-segment checks below.
-  "npm install", "npm i ", "npm i", "npm add", "npx ",
-  "pnpm install", "pnpm i ", "pnpm i", "pnpm add",
-  "yarn install", "yarn add", "yarn dlx ",
-  "bun install", "bun i ", "bun i", "bun add", "bun x ", "bunx ",
   "cargo add", "cargo install", "cargo fetch", "cargo update",
   "go get", "go install", "go mod download", "go mod tidy",
-  "pip install", "pip3 install", "python -m pip install", "python3 -m pip install",
-  "uv add", "uv pip install", "uv sync",
-  "pipx install", "poetry add", "poetry install",
   "gem install", "bundle install", "bundle add",
   "df ", "du ", "free ", "top -bn", "ps ",
-  "curl -I", "curl --head",
-  // Test / build runners — local coding models need to run their own tests.
   "pytest", "python -m pytest", "python -m unittest", "tox",
   "make", "cmake ", "ctest",
   "cargo build", "cargo test", "cargo check", "cargo run", "cargo clippy", "cargo fmt",
   "go test", "go build", "go run", "go vet",
-  // Read-only go introspection — models reach for these to inspect stdlib /
-  // module APIs (e.g. `go doc syscall`); none mutate the module or network.
   "go doc", "go list", "go env", "go version",
   "gradle ", "./gradlew", "mvn ", "dotnet test", "dotnet build",
   "jest", "vitest", "mocha", "tsc",
   "pnpm test", "pnpm run", "yarn test", "yarn run", "bun test", "bun run",
   "rustc ", "gcc ", "g++ ", "clang ", "javac ",
-  // Read-only text/inspection utilities.
   "mkdir ", "sed ", "awk ", "diff ", "sort ", "uniq ", "cut ", "tr ",
   "comm ", "jq ", "tree", "stat ", "file ", "basename ", "dirname ",
   "realpath ", "readlink ", "sha256sum ", "md5sum ", "xxd ", "nl ",
