@@ -245,7 +245,7 @@ priority wins, flushed after all handlers settle).
 | **quality-monitor** | `session_start`, `turn_end` | Assesses each turn for failure modes and queues a corrective steer. The aggressive "stop explaining, start acting" steers are suppressed for interactive Q&A; substantive corrections still fire. | on |
 | **skill-inject** | `session_start`, `before_agent_start`, `tool_result` | Selects relevant `skills/` docs within a token budget and injects them; a just-failed tool's skill is prioritized into the next turn's injection (via `before_agent_start`, not a deferred follow-up — see note). | on |
 | **knowledge-inject** | `before_agent_start` | Scores `skills/knowledge/*` + `skills/protocols/*` against the prompt and publishes required tools to skill-inject. | off (`OMPX_KNOWLEDGE_INJECT=1`) |
-| **permission-gate** | `tool_call` | Whitelist gate for `bash`: allows safe run/test/list + package installs, blocks command-substitution and out-of-scratch redirects; system package managers stay blocked. Non-whitelisted commands prompt the user for approval (full command shown, work-done-style toast + bell); no response for 30s or a "No" rejects. | on (`auto`) |
+| **permission-gate** | `tool_call` | Whitelist gate for `bash`: allows safe run/test/list + package installs, blocks command-substitution and out-of-scratch redirects; system package managers stay blocked. Non-whitelisted commands prompt the user for approval (full command shown, work-done-style toast + bell); no response for 30s or a "No" rejects, and an optional `blockReason` setting note is appended to the block reason when the user clicks "No". | on (`auto`) |
 
 ### `_shared/`
 

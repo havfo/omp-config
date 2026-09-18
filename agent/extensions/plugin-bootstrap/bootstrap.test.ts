@@ -2,7 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { bootstrapPluginInstall, type BootstrapRoots } from "./index.ts";
+import { bootstrapPluginInstall, type BootstrapRoots, default as bootstrapPlugin } from "./index.ts";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
 interface Fixture {
   root: string;
@@ -150,5 +151,14 @@ describe("bootstrapPluginInstall", () => {
     const report = await bootstrapPluginInstall(f.roots);
     expect(report.changed).toBe(false);
     expect(await readFile(f.roots.lockfilePath, "utf8")).toBe(before);
+  });
+});
+
+describe("plugin registration", () => {
+  test("wires the self-heal to session_start (startup only), not the per-turn before_agent_start", () => {
+    const events: string[] = [];
+    const pi = { on: (event: string) => { events.push(event); } } as unknown as ExtensionAPI;
+    bootstrapPlugin(pi);
+    expect(events).toEqual(["session_start"]);
   });
 });

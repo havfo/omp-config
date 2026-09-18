@@ -25,6 +25,10 @@ import { readFile } from "node:fs/promises";
 //                   "forever"   (prompt, no timeout — you are at the keyboard)
 //   whitelist: comma-separated prefixes; when non-empty it REPLACES the
 //             built-in SAFE_PREFIXES below.
+//   blockReason: standing note; when you reject a command (click "No") a note
+//             prompt opens — what you type there (or, if you leave it empty,
+//             this setting) is appended to the block reason the model sees, so
+//             you can steer the next attempt (e.g. "use the edit tool, not bash").
 //
 // The lockfile is read directly (fs, not a host-module import): extensions
 // run in-process, and importing @oh-my-pi/pi-coding-agent at runtime would
@@ -42,6 +46,8 @@ export interface GateSettings {
   approvalTimeout: ApprovalTimeout;
   /** When non-null, replaces the built-in SAFE_PREFIXES entirely. */
   whitelist: readonly string[] | null;
+  /** Standing note: fallback for the note prompt when you reject without typing one. */
+  blockReason: string | null;
 }
 
 function parseWhitelist(raw: unknown): readonly string[] | null {
@@ -61,7 +67,8 @@ export function mergeGateSettings(
   const timeout = APPROVAL_TIMEOUTS.includes(raw.approvalTimeout as ApprovalTimeout)
     ? (raw.approvalTimeout as ApprovalTimeout)
     : "30s";
-  return { approvalTimeout: timeout, whitelist: parseWhitelist(raw.whitelist) };
+  const blockReason = typeof raw.blockReason === "string" ? raw.blockReason.trim() : "";
+  return { approvalTimeout: timeout, whitelist: parseWhitelist(raw.whitelist), blockReason: blockReason.length > 0 ? blockReason : null };
 }
 
 function asRecord(v: unknown): Record<string, unknown> | undefined {
@@ -103,18 +110,38 @@ export async function loadGateSettings(
 }
 
 const SAFE_PREFIXES: readonly string[] = [
-  "cd ", "sleep", "for", "while", "do", "done",
+  // flow/no-ops that make compound commands parse. Loop PAYLOADS are checked
+  // separately in segmentSafe — a bare `do` entry must never whitelist a body.
+  "cd ", "sleep", "for", "while", "do", "done", "true", "false", ":",
+  // read-only inspection
   "ls", "cat", "head", "tail", "wc", "pwd", "echo", "printf", "date",
-  "which", "type", "env", "printenv", "uname", "whoami", "id",
+  "which", "type", "printenv", "uname", "whoami", "id",
+  "base64", "cmp", "tac", "nproc", "hostname", "seq", "yes", "mktemp",
+  "touch", "pgrep", "tree", "stat ", "file ",
+  "basename ", "dirname ", "realpath ", "readlink ",
+  "sha1sum ", "sha224sum ", "sha256sum ", "sha384sum ", "sha512sum ",
+  "b2sum ", "md5sum ", "xxd ", "nl ",
+  "df ", "du ", "free ", "top -bn", "ps ",
+  // git: read forms only (mutating flags are gated in hasGitMutation)
   "git log", "git status", "git diff", "git show", "git branch",
   "git remote", "git stash list", "git tag",
+  // network inspection
   "curl", "wget", "netcat", "nc", "netstat", "ping", "ping6", "traceroute", "traceroute6",
+  // search (find's mutating flags are gated in hasFindMutation)
   "find ", "grep ", "rg ", "ag ", "fd ",
+  // text capture and transforms (tee targets gated in hasTeeNonScratch,
+  // sed -i in hasSedInPlace)
+  "mkdir ", "sed ", "diff ", "sort ", "uniq ", "cut ", "tr ",
+  "comm ", "jq ", "tee",
+  // introspection + installs (pip install deliberately excluded: it can run
+  // arbitrary setup code — add it via the whitelist setting if you want it)
   "pip show", "pip list", "cargo metadata",
   "cargo add", "cargo install", "cargo fetch", "cargo update",
   "go get", "go install", "go mod download", "go mod tidy",
   "gem install", "bundle install", "bundle add",
-  "df ", "du ", "free ", "top -bn", "ps ",
+  "npm install", "npm ci", "pnpm install", "pnpm add", "yarn install",
+  "bun install", "bun add",
+  // build / test / run
   "pytest", "python -m pytest", "python -m unittest", "tox",
   "make", "cmake ", "ctest",
   "cargo build", "cargo test", "cargo check", "cargo run", "cargo clippy", "cargo fmt",
@@ -124,9 +151,6 @@ const SAFE_PREFIXES: readonly string[] = [
   "jest", "vitest", "mocha", "tsc",
   "pnpm test", "pnpm run", "yarn test", "yarn run", "bun test", "bun run",
   "rustc ", "gcc ", "g++ ", "clang ", "javac ",
-  "mkdir ", "sed ", "awk ", "diff ", "sort ", "uniq ", "cut ", "tr ",
-  "comm ", "jq ", "tree", "stat ", "file ", "basename ", "dirname ",
-  "realpath ", "readlink ", "sha256sum ", "md5sum ", "xxd ", "nl ",
 ];
 
 // Split a command line into the sub-commands that bash will actually run,
@@ -208,10 +232,129 @@ function hasFileRedirect(seg: string): boolean {
   return false;
 }
 
+// `find` can mutate the filesystem without any visible redirect: `-delete`
+// removes files, `-exec`/`-ok` run an arbitrary command per match. The plain
+// listing forms stay allowed.
+function hasFindMutation(seg: string): boolean {
+  const toks = seg.trim().split(/\s+/);
+  if (toks[0] !== "find") return false;
+  return toks.some((t) =>
+    t === "-delete" || t === "-exec" || t === "-execdir" || t === "-ok" || t === "-okdir");
+}
+
+// `sed -i` rewrites a file in place — a write that bypasses Write/Edit exactly
+// like a bad redirect does. The non-in-place forms are read transforms.
+function hasSedInPlace(seg: string): boolean {
+  const toks = seg.trim().split(/\s+/);
+  if (toks[0] !== "sed") return false;
+  return toks.some((t) => t === "-i" || t === "--in-place" || (t.startsWith("-i.") && t.length > 3));
+}
+
+// `git branch`/`git tag`/`git remote` list refs and config by default, but
+// their mutating forms delete or rewrite them (`git branch -d x`,
+// `git tag -d v1`, `git remote add origin x`).
+function hasGitMutation(seg: string): boolean {
+  const toks = seg.trim().split(/\s+/);
+  if (toks[0] !== "git") return false;
+  const sub = toks[1];
+  if (sub === "branch") return toks.slice(2).some((t) => ["-d", "-D", "-m", "-M", "-c"].includes(t));
+  if (sub === "tag") return toks.slice(2).includes("-d");
+  if (sub === "remote") return ["add", "remove", "rename", "set-url", "set-head"].includes(toks[2]);
+  return false;
+}
+
+// `tee` writes its file arguments — the same class as a redirect. Only the
+// null/std devices and scratch targets are safe. (None of tee's flags take an
+// argument, so every non-flag token is a file.)
+function hasTeeNonScratch(seg: string): boolean {
+  const toks = seg.trim().split(/\s+/);
+  if (toks[0] !== "tee") return false;
+  return toks.slice(1).some((t) => !t.startsWith("-") && !isAllowedRedirectTarget(t));
+}
+
+// Loop constructs hide the real command in their payload: `while true; do
+// rm -rf /; done` splits into `while true` / `do rm -rf /` / `done`, and a
+// bare `do` entry would whitelist the segment regardless of the payload. A
+// loop segment is only safe when its payload (the command after `do`, or the
+// condition after `while`/`until`) is itself safe. `for <spec>` carries no
+// executable command (the spec cannot run; substitution is caught above),
+// and `done` has no payload.
 function segmentSafe(seg: string, list: readonly string[]): boolean {
   if (hasCommandSubstitution(seg)) return false;
   if (hasFileRedirect(seg)) return false;
+  if (hasFindMutation(seg)) return false;
+  if (hasSedInPlace(seg)) return false;
+  if (hasGitMutation(seg)) return false;
+  if (hasTeeNonScratch(seg)) return false;
+  const toks = seg.trim().split(/\s+/);
+  const head = toks[0];
+  if (head === "do" || head === "while" || head === "until") {
+    const payload = toks.slice(1).join(" ");
+    return payload.length > 0 && segmentSafe(payload, list);
+  }
   return list.some((p) => prefixMatches(seg, p));
+}
+
+// ── Static variable analysis ─────────────────────────────────────────────
+// The bash tool runs a PERSISTENT shell, so the model writes `c=/path` in one
+// call and `ls $c` in another. Within one command line that is checkable
+// statically: a pure assignment segment executes nothing, so it is safe when
+// its value is a literal, and the value is recorded so later `$c`/`${c}` uses
+// are expanded and validated like inline text.
+//
+// Deliberately conservative:
+//   - values containing `$` or backticks are rejected — they could expand or
+//     run something we cannot see;
+//   - assignments glued to a command (`LD_PRELOAD=x ls`) are NOT resolved —
+//     env-prefixed commands can load arbitrary code, and the bash tool has a
+//     dedicated `env` argument for the legit case;
+//   - loop iteration variables take values we cannot see (globs, command
+//     output), so segments that use them are left to the prompt;
+//   - expansions we otherwise cannot resolve ($HOME, $?, variables from
+//     EARLIER calls — persistent-shell state is invisible) are left to the
+//     prompt too.
+const ASSIGN_TOKEN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
+
+// True when the whole segment is one or more NAME=value assignments with
+// literal values (applied to vars); false for commands, mixed shapes, or a
+// value that would expand.
+function applyAssignment(seg: string, vars: Record<string, string>): boolean {
+  for (const t of seg.trim().split(/\s+/)) {
+    const m = ASSIGN_TOKEN.exec(t);
+    if (!m) return false;
+    const raw = m[2];
+    let value: string;
+    if (raw.length >= 2 && raw[0] === "'" && raw.endsWith("'")) {
+      value = raw.slice(1, -1); // single-quoted: no expansion, taken as-is
+    } else if (raw.length >= 2 && raw[0] === '"' && raw.endsWith('"')) {
+      if (raw.includes("$") || raw.includes("`")) return false; // would expand
+      value = raw.slice(1, -1);
+    } else {
+      if (raw.includes("$") || raw.includes("`")) return false; // would expand
+      value = raw;
+    }
+    vars[m[1]] = value;
+  }
+  return true;
+}
+
+// Expand $c/${c} from known literal values; null when anything remains that
+// we cannot resolve (loop variables, unknown variables, $?, $$, backticks,
+// escaped $, ...).
+function resolveSegment(
+  seg: string,
+  vars: Record<string, string>,
+  loopVars: Set<string>,
+): string | null {
+  let unknown = false;
+  const resolved = seg.replace(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g, (match, id: string) => {
+    if (loopVars.has(id)) { unknown = true; return match; } // invisible value
+    if (id in vars) return vars[id];
+    unknown = true;
+    return match;
+  });
+  if (unknown || resolved.includes("$") || resolved.includes("`")) return null;
+  return resolved;
 }
 
 // Returns the first sub-command that fails the whitelist, or null if all pass.
@@ -220,7 +363,18 @@ export function firstUnsafeSegment(command: string, list: readonly string[] = SA
   if (!c) return c;
   const segs = splitSegments(c);
   if (segs.length === 0) return c;
-  for (const seg of segs) if (!segmentSafe(seg, list)) return seg;
+  const vars: Record<string, string> = {};
+  const loopVars = new Set<string>();
+  for (const seg of segs) {
+    if (applyAssignment(seg, vars)) continue; // literal assignment: executes nothing
+    const resolved = resolveSegment(seg, vars, loopVars);
+    if (resolved === null) return seg; // unresolvable expansion: ask the user
+    if (!segmentSafe(resolved, list)) return seg;
+    // `for NAME in ...`: register the iteration variable (its values are
+    // invisible: globs, file lists, command output).
+    const forMatch = /^for ([A-Za-z_][A-Za-z0-9_]*) in /.exec(resolved);
+    if (forMatch) loopVars.add(forMatch[1]);
+  }
   return null;
 }
 
@@ -300,6 +454,8 @@ const INTENT_HINTS: Record<string, string> = {
   kill:  "Process management isn't whitelisted. Ask the user.",
   apt:   "Package install isn't whitelisted. Ask the user to install dependencies.",
   brew:  "Package install isn't whitelisted. Ask the user to install dependencies.",
+  awk:   "awk can run shell commands (system(), |) and write files. Use grep/jq/cut for text transforms, or ask for approval.",
+  env:   "Don't prefix commands with `env` — pass variables via bash's `env` argument: {\"command\":\"...\",\"env\":{\"NAME\":\"value\"}}.",
 };
 
 function suggestNearestPrefix(cmd: string, list: readonly string[]): string | undefined {
@@ -335,6 +491,7 @@ export function buildBlockReason(
   mode: "auto" | "manual",
   list: readonly string[] = SAFE_PREFIXES,
   approval: ApprovalTimeout = "30s",
+  userReason: string | null = null,
 ): string {
   // Report the specific offending sub-command, not the whole line's head —
   // for `cd /x && rm -rf` the problem is `rm`, not `cd`.
@@ -349,31 +506,60 @@ export function buildBlockReason(
       : "the user did not approve at the prompt (no response within 30s or explicit No).";
   const prefix = `${base}, ${tail}`;
 
-  if (hasCommandSubstitution(bad)) {
-    return `${prefix} Command substitution ($(...) or backticks) isn't allowed — ` +
-      `it can run arbitrary commands. Run the inner command directly if it's whitelisted.`;
-  }
-
-  if (hasFileRedirect(bad)) {
-    return `${prefix} Output redirection writes a file outside the checkpointed ` +
-      `Write/Edit tools. Redirect to a scratch path (e.g. > /tmp/out.txt) if you ` +
-      `just need to capture output; otherwise use Write to create a file or Edit ` +
-      `to change one.`;
+  // A segment whose variables the static analysis could not resolve: say
+  // exactly that — the fix is to inline the value.
+  if (/\$/.test(bad)) {
+    return `${prefix} the segment uses shell variables the gate cannot resolve statically — inline the value literally (e.g. "ls /tmp/data", not "ls $c") and try again.`;
   }
 
   const head = bad.split(/\s+/)[0] ?? "";
-  const intent = INTENT_HINTS[head];
-  if (intent) return `${prefix} "${head}" — ${intent}`;
-
-  const exact = suggestNearestPrefix(bad, list);
-  if (exact) return `${prefix} "${head}" is not in SAFE_PREFIXES. Try "${exact.trim()}" instead.`;
-  // For a blocked subcommand of a known multi-subcommand tool, list the actual
-  // whitelisted siblings rather than picking one (which could be destructive).
-  const siblings = headSiblings(head, list);
-  const tailLine = siblings.length
-    ? `Whitelisted "${head}" subcommands: ${siblings.join(", ")}.`
-    : `Whitelisted starts: ${list.slice(0, 12).map((p) => p.trim()).join(", ")} ...`;
-  return `${prefix} "${head}" is not in SAFE_PREFIXES. ${tailLine}`;
+  let body: string;
+  if (hasCommandSubstitution(bad)) {
+    body = "Command substitution ($(...) or backticks) isn't allowed — " +
+      "it can run arbitrary commands. Run the inner command directly if it's whitelisted.";
+  } else if (hasFileRedirect(bad)) {
+    body = "Output redirection writes a file outside the checkpointed " +
+      "Write/Edit tools. Redirect to a scratch path (e.g. > /tmp/out.txt) if you " +
+      "just need to capture output; otherwise use Write to create a file or Edit " +
+      "to change one.";
+  } else if (hasFindMutation(bad)) {
+    body = "find's mutating flags (-delete, -exec, -ok, ...) remove files or run arbitrary " +
+      "commands per match. List the files first, then delete via the Edit tool's REM op or ask the user.";
+  } else if (hasSedInPlace(bad)) {
+    body = "sed -i rewrites the file in place, bypassing the Edit tool's read-before-edit guard. " +
+      "Transform to stdout into a scratch file and use Write, or use Edit directly.";
+  } else if (hasGitMutation(bad)) {
+    body = "git ref/config mutations (branch/tag delete or rename, remote changes) aren't " +
+      "whitelisted. Ask the user.";
+  } else if (hasTeeNonScratch(bad)) {
+    body = "tee writes its file arguments, like a redirect. Point it at a scratch path " +
+      "(| tee /tmp/out.txt) or /dev/null.";
+  } else if (head === "do" || head === "while" || head === "until") {
+    body = `loops are checked segment by segment — "${bad}" isn't whitelisted, so a loop can't hide it.`;
+  } else {
+    const intent = INTENT_HINTS[head];
+    if (intent) {
+      body = `"${head}" — ${intent}`;
+    } else {
+      const exact = suggestNearestPrefix(bad, list);
+      if (exact) {
+        body = `"${head}" is not in SAFE_PREFIXES. Try "${exact.trim()}" instead.`;
+      } else {
+        // For a blocked subcommand of a known multi-subcommand tool, list the actual
+        // whitelisted siblings rather than picking one (which could be destructive).
+        const siblings = headSiblings(head, list);
+        const tailLine = siblings.length
+          ? `Whitelisted "${head}" subcommands: ${siblings.join(", ")}.`
+          : `Whitelisted starts: ${list.slice(0, 12).map((p) => p.trim()).join(", ")} ...`;
+        body = `"${head}" is not in SAFE_PREFIXES. ${tailLine}`;
+      }
+    }
+  }
+  const reason = `${prefix} ${body}`;
+  // The user's note — typed at the "No" prompt, or the standing blockReason
+  // setting when that prompt is left empty — is appended verbatim, quoted, at
+  // the end; the model should treat it as an instruction for the next attempt.
+  return userReason ? `${reason} The user's note: "${userReason}"` : reason;
 }
 
 // How long the approval dialog stays open before the highlighted option takes
@@ -406,24 +592,34 @@ async function sendApprovalNotification(): Promise<void> {
 // Ask the user whether to run a non-whitelisted command. The TUI dialog is a
 // Yes/No selector; in "30s" mode its timeout applies the currently highlighted
 // option, so the cursor starts on "No": doing nothing for 30s rejects, while
-// an explicit move to "Yes" that times out approves. In "forever" mode no
-// timeout is armed and the prompt stays open until the user answers (Esc is
-// treated as a block). "immediate" mode never calls this (the handler blocks
-// up front); it returns false defensively. The prompt and option labels are
-// plain text — no ANSI colors, no markdown — because the same strings are
-// broadcast verbatim to the collab browser client, which renders them raw;
-// the terminal TUI paints the title's extra lines in the accent color on
-// its own. Options carry one-line descriptions. Any failure (no UI, dialog
-// error, notification error) resolves false, so the safe default remains
-// "block".
+// an explicit move to "Yes" that times out approves. An explicit "No" opens a
+// follow-up note prompt — the user's one-line guidance for the model, appended
+// to the block reason. In "forever" mode no timeout is armed and the prompts
+// stay open until the user answers (Esc is treated as a block). "immediate"
+// mode never calls this (the handler blocks up front); it returns false
+// defensively. The prompt and option labels are plain text — no ANSI colors,
+// no markdown — because the same strings are broadcast verbatim to the collab
+// browser client, which renders them raw; the terminal TUI paints the title's
+// extra lines in the accent color on its own. Options carry one-line
+// descriptions. Any failure (no UI, dialog error, notification error) resolves
+// false, so the safe default remains "block", with explicitDenial true only
+// when the user actively chose "No".
+export interface ApprovalOutcome {
+  approved: boolean;
+  /** True only when the user actively chose "No" (a timeout or Esc does not count). */
+  explicitDenial: boolean;
+  /** Note typed at the denial prompt; null when the prompt was left empty. */
+  note: string | null;
+}
+
 export async function askApproval(
   ctx: ExtensionContext,
   cmd: string,
   bad: string,
   timeout: ApprovalTimeout = "30s",
-): Promise<boolean> {
-  if (!ctx.hasUI) return false;
-  if (timeout === "immediate") return false;
+): Promise<ApprovalOutcome> {
+  if (!ctx.hasUI) return { approved: false, explicitDenial: false, note: null };
+  if (timeout === "immediate") return { approved: false, explicitDenial: false, note: null };
   const shown = cmd.trim();
   const prompt = [
     "permission-gate: run non-whitelisted command?",
@@ -439,13 +635,34 @@ export async function askApproval(
       prompt,
       [
         { label: yesLabel, description: "execute the command above" },
-        { label: noLabel, description: "keep it blocked (the model is told why)" },
+        { label: noLabel, description: "keep it blocked, with an optional note for the model" },
       ],
       { timeout: timeout === "forever" ? undefined : APPROVAL_TIMEOUT_MS, initialIndex: 1 },
     );
-    return result === yesLabel;
+    if (result === yesLabel) return { approved: true, explicitDenial: false, note: null };
+    if (result === noLabel) {
+      return { approved: false, explicitDenial: true, note: await askDenialNote(ctx, timeout) };
+    }
+    return { approved: false, explicitDenial: false, note: null };
   } catch {
-    return false;
+    return { approved: false, explicitDenial: false, note: null };
+  }
+}
+
+// After an explicit "No", offer a one-line note for the model — it is appended
+// to the block reason and steers the next attempt. Esc or an empty line means
+// no note; any failure leaves the denial standing without guidance.
+async function askDenialNote(ctx: ExtensionContext, timeout: ApprovalTimeout): Promise<string | null> {
+  try {
+    const typed = await ctx.ui.input(
+      "Note to the model (optional) — added to the block reason it receives.",
+      "e.g. use the Edit tool, not bash — Esc leaves it empty",
+      { timeout: timeout === "forever" ? undefined : APPROVAL_TIMEOUT_MS },
+    );
+    const note = typeof typed === "string" ? typed.trim() : "";
+    return note.length > 0 ? note : null;
+  } catch {
+    return null;
   }
 }
 
@@ -508,16 +725,20 @@ export default function (pi: ExtensionAPI) {
         const list = settings.whitelist ?? SAFE_PREFIXES;
         const bad = firstUnsafeSegment(cmd, list);
         if (bad !== null) {
-          const reason = buildBlockReason(cmd, mode === "manual" ? "manual" : "auto", list, settings.approvalTimeout);
           // "immediate": no dialog, no notification — reject up front so an
           // unattended session never burns 30s per non-whitelisted call.
-          const approved = settings.approvalTimeout === "immediate"
-            ? false
+          const outcome = settings.approvalTimeout === "immediate"
+            ? { approved: false, explicitDenial: false, note: null }
             : await askApproval(ctx, cmd, bad, settings.approvalTimeout);
-          if (approved) {
+          if (outcome.approved) {
             try { ctx.ui.notify("permission-gate: approved non-whitelisted command", "info"); } catch {}
             return; // user approved — let the tool run
           }
+          // The user's note — typed at the "No" prompt, or the standing
+          // blockReason setting when that prompt is left empty — is attached
+          // only on an explicit "No": a timeout or Esc is silence, not guidance.
+          const note = outcome.explicitDenial ? (outcome.note ?? settings.blockReason) : null;
+          const reason = buildBlockReason(cmd, mode === "manual" ? "manual" : "auto", list, settings.approvalTimeout, note);
           const head = bad.trim().split(/\s+/)[0] ?? "";
           try {
             const tag = hasCommandSubstitution(bad)

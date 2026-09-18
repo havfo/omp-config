@@ -119,6 +119,93 @@ describe("isSafeBash", () => {
   });
 });
 
+describe("variable assignment static analysis", () => {
+  it("tracks literal assignments and validates expanded uses", () => {
+    expect(isSafeBash("c=/tmp/data && ls $c")).toBe(true);
+    expect(isSafeBash("c='/tmp/data' && cat $c")).toBe(true);
+    expect(isSafeBash('c="/tmp/data" && wc -l ${c}')).toBe(true);
+    expect(isSafeBash("c=/tmp/a; d=/tmp/b && ls $c $d")).toBe(true);
+  });
+  it("prompts on expansions the analysis cannot resolve", () => {
+    expect(isSafeBash("ls $HOME")).toBe(false);
+    expect(isSafeBash("c=/tmp && ls $unknown")).toBe(false);
+    expect(isSafeBash("c=$(pwd) && ls $c")).toBe(false);
+    expect(isSafeBash("c=`pwd` && ls $c")).toBe(false);
+    expect(isSafeBash("d=$c && ls $d")).toBe(false); // value referencing another var
+  });
+  it("leaves env-prefixed commands to the prompt (LD_PRELOAD-class risk)", () => {
+    expect(isSafeBash("LD_PRELOAD=/tmp/evil.so ls")).toBe(false);
+    expect(isSafeBash("CFLAGS=-O2 gcc main.c")).toBe(false);
+  });
+  it("validates redirect targets through known variables", () => {
+    expect(isSafeBash("c=/tmp/out && echo hi > $c")).toBe(true);
+    expect(isSafeBash("c=src.go && echo hi > $c")).toBe(false);
+  });
+  it("explains unresolvable variables in the block reason", () => {
+    expect(buildBlockReason("ls $HOME", "auto")).toMatch(/cannot resolve statically/);
+  });
+});
+
+describe("bypass guards on whitelisted tools", () => {
+  it("does not let loop bodies hide arbitrary commands", () => {
+    expect(isSafeBash("while true; do rm -rf /; done")).toBe(false);
+    expect(isSafeBash("for f in *; do rm $f; done")).toBe(false);
+    expect(isSafeBash("do rm -rf x")).toBe(false);
+  });
+  it("still allows loops whose payload is whitelisted", () => {
+    expect(isSafeBash("for f in a b; do echo hi; done")).toBe(true);
+    expect(isSafeBash("while curl -sf localhost:8080/x; do sleep 1; done")).toBe(true);
+  });
+  it("prompts when a loop body uses the iteration variable", () => {
+    expect(isSafeBash("for f in *; do wc -l $f; done")).toBe(false);
+  });
+  it("gates find's mutating flags but not listing", () => {
+    expect(isSafeBash("find . -name '*.log' -delete")).toBe(false);
+    expect(isSafeBash("find . -exec rm {} ;")).toBe(false);
+    expect(isSafeBash("find src -name '*.ts'")).toBe(true);
+  });
+  it("gates sed -i but not read transforms", () => {
+    expect(isSafeBash("sed -i 's/a/b/' src.go")).toBe(false);
+    expect(isSafeBash("sed -n '1,5p' src.go")).toBe(true);
+  });
+  it("gates git ref mutations but not listing", () => {
+    expect(isSafeBash("git branch -d feature")).toBe(false);
+    expect(isSafeBash("git tag -d v1")).toBe(false);
+    expect(isSafeBash("git remote add origin x")).toBe(false);
+    expect(isSafeBash("git branch")).toBe(true);
+    expect(isSafeBash("git tag")).toBe(true);
+    expect(isSafeBash("git remote -v")).toBe(true);
+  });
+  it("drops command-runners that hide other commands (env, awk)", () => {
+    expect(isSafeBash("env rm -rf x")).toBe(false);
+    expect(isSafeBash("env FOO=bar ls")).toBe(false);
+    expect(isSafeBash("awk 'BEGIN { system(\"id\") }'")).toBe(false);
+    expect(isSafeBash("awk '{print $1}' file")).toBe(false);
+  });
+  it("lets tee mirror to scratch but not to project files", () => {
+    expect(isSafeBash("ls | tee /tmp/out.txt")).toBe(true);
+    expect(isSafeBash("ls | tee /dev/null")).toBe(true);
+    expect(isSafeBash("ls | tee log.txt")).toBe(false);
+  });
+  it("ships the missing read-only utils and JS installs", () => {
+    expect(isSafeBash("base64 file.bin")).toBe(true);
+    expect(isSafeBash("cmp a b")).toBe(true);
+    expect(isSafeBash("tac log")).toBe(true);
+    expect(isSafeBash("nproc")).toBe(true);
+    expect(isSafeBash("hostname")).toBe(true);
+    expect(isSafeBash("seq 1 10")).toBe(true);
+    expect(isSafeBash("mktemp")).toBe(true);
+    expect(isSafeBash("touch .gitkeep")).toBe(true);
+    expect(isSafeBash("pgrep -f server")).toBe(true);
+    expect(isSafeBash("sha512sum lock.json")).toBe(true);
+    expect(isSafeBash("b2sum lock.json")).toBe(true);
+    expect(isSafeBash("pnpm install")).toBe(true);
+    expect(isSafeBash("npm ci")).toBe(true);
+    expect(isSafeBash("bun install typescript")).toBe(true);
+    expect(isSafeBash("yarn install")).toBe(true);
+  });
+});
+
 describe("buildBlockReason", () => {
   it("lists whitelisted siblings instead of singling out a destructive one", () => {
     // `go generate` is blocked; the hint must NOT single out `go get` as THE
@@ -142,6 +229,23 @@ describe("buildBlockReason", () => {
   it("says explicit-No only in forever mode (no silent timeout there)", () => {
     expect(buildBlockReason("git push origin main", "auto", undefined, "forever")).toMatch(/explicit No/);
     expect(buildBlockReason("git push origin main", "auto", undefined, "30s")).toMatch(/no response within 30s or explicit No/);
+  });
+  it("appends the user's note only when one was given", () => {
+    const withNote = buildBlockReason("git push origin main", "auto", undefined, "forever", "don't push, open a PR");
+    expect(withNote).toMatch(/The user's note: "don't push, open a PR"/);
+    expect(withNote).toMatch(/explicit No/); // standard reason is kept, note is additive
+    expect(buildBlockReason("git push origin main", "auto")).not.toMatch(/user's note/);
+    expect(buildBlockReason("git push origin main", "auto", undefined, "forever", null)).not.toMatch(/user's note/);
+  });
+
+  it("names the specific guard for guard-blocked commands, not the generic prefix message", () => {
+    const sed = buildBlockReason("sed -i 's/a/b/' src.go", "auto");
+    expect(sed).toMatch(/in place/);
+    expect(sed).not.toMatch(/Try "sed" instead/);
+    expect(buildBlockReason("find . -name '*.log' -delete", "auto")).toMatch(/mutating flags/);
+    expect(buildBlockReason("git tag -d v1", "auto")).toMatch(/aren't whitelisted/);
+    expect(buildBlockReason("ls | tee log.txt", "auto")).toMatch(/scratch path/);
+    expect(buildBlockReason("while true; do rm -rf /; done", "auto")).toMatch(/segment by segment/);
   });
 });
 
@@ -173,24 +277,45 @@ describe("askApproval", () => {
       options: Array<{ label: string; description: string }>,
       opts?: { timeout?: number; initialIndex?: number },
     ) => Promise<string | undefined>,
-  ) => ({ hasUI, ui: { select } }) as unknown as ExtensionContext;
+    input: (
+      title: string,
+      placeholder?: string,
+      opts?: { timeout?: number },
+    ) => Promise<string | undefined> = vi.fn().mockResolvedValue(undefined),
+  ) => ({ hasUI, ui: { select, input } }) as unknown as ExtensionContext;
 
   it("denies when no UI is available (headless stays a hard block)", async () => {
     const select = vi.fn();
-    await expect(askApproval(makeCtx(false, select), cmd, bad)).resolves.toBe(false);
+    await expect(askApproval(makeCtx(false, select), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: false, note: null });
     expect(select).not.toHaveBeenCalled();
     expect(sendNotification).not.toHaveBeenCalled();
   });
   it("forwards the user's explicit choice", async () => {
-    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue("Yes — run it")), cmd, bad)).resolves.toBe(true);
-    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue("No — block it")), cmd, bad)).resolves.toBe(false);
-    // Esc / cancel (undefined) is a block too.
-    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(undefined)), cmd, bad)).resolves.toBe(false);
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue("Yes — run it")), cmd, bad)).resolves.toEqual({ approved: true, explicitDenial: false, note: null });
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue("No — block it")), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: true, note: null });
+    // Esc / cancel (undefined) blocks too, but is NOT an explicit denial — it carries no guidance.
+    await expect(askApproval(makeCtx(true, vi.fn().mockResolvedValue(undefined)), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: false, note: null });
+  });
+  it("opens a note prompt on explicit No and captures what is typed", async () => {
+    const select = vi.fn().mockResolvedValue("No — block it");
+    const input = vi.fn().mockResolvedValue("  don't rm, use Edit  ");
+    await expect(askApproval(makeCtx(true, select, input), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: true, note: "don't rm, use Edit" });
+    expect(input).toHaveBeenCalledTimes(1);
+  });
+  it("leaves the note null when the prompt is cancelled or left empty", async () => {
+    const select = vi.fn().mockResolvedValue("No — block it");
+    await expect(askApproval(makeCtx(true, select, vi.fn().mockResolvedValue(undefined)), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: true, note: null });
+    await expect(askApproval(makeCtx(true, select, vi.fn().mockResolvedValue("   ")), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: true, note: null });
+  });
+  it("keeps the denial when the note prompt fails (no input surface)", async () => {
+    const select = vi.fn().mockResolvedValue("No — block it");
+    const input = vi.fn().mockRejectedValue(new Error("no input surface"));
+    await expect(askApproval(makeCtx(true, select, input), cmd, bad)).resolves.toEqual({ approved: false, explicitDenial: true, note: null });
   });
   it("denies when the dialog throws (safety default is block)", async () => {
     await expect(
       askApproval(makeCtx(true, vi.fn().mockRejectedValue(new Error("session ended"))), cmd, bad),
-    ).resolves.toBe(false);
+    ).resolves.toEqual({ approved: false, explicitDenial: false, note: null });
   });
   it("shows the FULL command (no truncation), starts the cursor on No, and times out at 30s", async () => {
     const longCmd = `curl -s "http://example.com/api?token=${"a".repeat(500)}" | grep secret`;
@@ -238,7 +363,7 @@ describe("approvalTimeout modes", () => {
   it("immediate: no dialog, no notification, hard block", async () => {
     const select = vi.fn();
     sendNotification.mockClear();
-    await expect(askApproval(makeCtx(select), cmd, bad, "immediate")).resolves.toBe(false);
+    await expect(askApproval(makeCtx(select), cmd, bad, "immediate")).resolves.toEqual({ approved: false, explicitDenial: false, note: null });
     expect(select).not.toHaveBeenCalled();
     expect(sendNotification).not.toHaveBeenCalled();
   });
@@ -288,6 +413,16 @@ describe("mergeGateSettings", () => {
     expect(mergeGateSettings({ whitelist: ["ls"] }, undefined).whitelist).toBeNull();
     expect(mergeGateSettings({ whitelist: 7 }, undefined).whitelist).toBeNull();
   });
+  it("parses blockReason (trimmed; empty, whitespace, or non-string falls back to null)", () => {
+    expect(mergeGateSettings({ blockReason: "  use Edit, not bash  " }, undefined).blockReason).toBe("use Edit, not bash");
+    expect(mergeGateSettings({ blockReason: "" }, undefined).blockReason).toBeNull();
+    expect(mergeGateSettings({ blockReason: "   " }, undefined).blockReason).toBeNull();
+    expect(mergeGateSettings({ blockReason: 7 }, undefined).blockReason).toBeNull();
+  });
+  it("project blockReason beats global", () => {
+    expect(mergeGateSettings({ blockReason: "a" }, { blockReason: "b" }).blockReason).toBe("b");
+  });
+
 });
 
 describe("whitelist override", () => {
@@ -320,17 +455,19 @@ describe("loadGateSettings", () => {
     const dir = tempDir();
     const lock = path.join(dir, "omp-plugins.lock.json");
     const overrides = path.join(dir, ".omp", "plugin-overrides.json");
-    writeFileSync(lock, JSON.stringify({ plugins: {}, settings: { "permission-gate": { approvalTimeout: "immediate" } } }));
+    writeFileSync(lock, JSON.stringify({ plugins: {}, settings: { "permission-gate": { approvalTimeout: "immediate", blockReason: "no deploys" } } }));
 
     let s = await loadGateSettings(dir, { lockPath: lock, overridesPath: overrides });
     expect(s.approvalTimeout).toBe("immediate");
     expect(s.whitelist).toBeNull();
+    expect(s.blockReason).toBe("no deploys");
     // project override wins; unset keys still fall through to global
     mkdirSync(path.dirname(overrides), { recursive: true });
     writeFileSync(overrides, JSON.stringify({ settings: { "permission-gate": { approvalTimeout: "forever", whitelist: "ls, wc" } } }));
     s = await loadGateSettings(dir, { lockPath: lock, overridesPath: overrides });
     expect(s.approvalTimeout).toBe("forever");
     expect(s.whitelist).toEqual(["ls", "wc"]);
+    expect(s.blockReason).toBe("no deploys"); // project file leaves it unset → global falls through
   });
 
   it("missing or corrupt files fall back to defaults", async () => {

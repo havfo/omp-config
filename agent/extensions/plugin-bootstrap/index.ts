@@ -14,12 +14,13 @@ import * as path from "node:path";
 // The harness never auto-installs from (1): runtime plugin discovery only
 // reads the plugins data root (2+3). If a config dir is copied to a new path,
 // an absolute symlink in (2) breaks and (3) may be missing entirely — the
-// plugin then loads silently-not at all. This extension runs at
-// before_agent_start, finds every plugin source under plugins-src/, and
-// re-establishes (2) as a RELATIVE symlink plus (3) if missing, so a fresh
-// copy of the config dir self-heals on the first start. The plugin itself
-// only becomes active from the next session start (discovery happens at
-// startup, before this handler can run).
+// plugin then loads silently-not at all. This extension runs once at
+// session_start — the startup event, not every turn, because install
+// self-healing is a one-shot need — finds every plugin source under
+// plugins-src/, and re-establishes (2) as a RELATIVE symlink plus (3) if
+// missing, so a fresh copy of the config dir self-heals on the first start.
+// The plugin itself only becomes active from the next session start
+// (discovery happens at startup, before this handler can run).
 //
 // Deliberately conservative:
 //   - Only sources with a loadable manifest (package.json with a name and an
@@ -185,7 +186,7 @@ export async function resolveRoots(): Promise<BootstrapRoots> {
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.on("before_agent_start", async (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     try {
       const report = await bootstrapPluginInstall(await resolveRoots());
       if (report.changed) {

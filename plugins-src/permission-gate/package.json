@@ -21,6 +21,11 @@
         "type": "string",
         "default": "",
         "description": "Comma-separated command prefixes allowed without approval. Replaces the built-in whitelist when non-empty; leave empty to use the built-in list. Command-substitution and non-scratch redirect guards still apply."
+      },
+      "blockReason": {
+        "type": "string",
+        "default": "",
+        "description": "Standing note for rejections: clicking No opens a note prompt, and what you type there (or, if you leave it empty, this value) is appended to the block reason the model sees (e.g. \"use the edit tool, not bash\"). Leave empty to use only per-rejection notes."
       }
     }
   }
