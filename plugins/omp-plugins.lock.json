@@ -1,0 +1,14 @@
+{
+  "plugins": {
+    "permission-gate": {
+      "version": "1.0.0",
+      "enabledFeatures": null,
+      "enabled": true
+    }
+  },
+  "settings": {
+    "permission-gate": {
+      "approvalTimeout": "forever"
+    }
+  }
+}

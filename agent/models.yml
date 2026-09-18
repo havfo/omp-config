@@ -5,4 +5,9 @@ providers:
     auth: none
     discovery:
       type: llama.cpp
-
+  mac-llama.cpp:
+    baseUrl: http://192.168.50.90:8080/v1
+    api: openai-responses
+    auth: none
+    discovery:
+      type: llama.cpp

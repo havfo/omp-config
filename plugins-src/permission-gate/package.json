@@ -1,0 +1,27 @@
+{
+  "name": "permission-gate",
+  "version": "1.0.0",
+  "description": "Bash whitelist gate: non-whitelisted commands require interactive approval. Timeout behavior and the whitelist are configurable via /settings → Plugins.",
+  "omp": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "settings": {
+      "approvalTimeout": {
+        "type": "enum",
+        "values": [
+          "30s",
+          "immediate",
+          "forever"
+        ],
+        "default": "30s",
+        "description": "How non-whitelisted commands are handled. 30s: prompt, auto-reject after 30s of silence (default). immediate: block instantly without prompting — use when away from the keyboard. forever: prompt and wait until you answer — use when at the keyboard."
+      },
+      "whitelist": {
+        "type": "string",
+        "default": "",
+        "description": "Comma-separated command prefixes allowed without approval. Replaces the built-in whitelist when non-empty; leave empty to use the built-in list. Command-substitution and non-scratch redirect guards still apply."
+      }
+    }
+  }
+}

@@ -28,11 +28,14 @@ Gotchas not stated in the `bash` tool description:
   everything left depends on it, stop and end your turn with one line saying you are waiting
   for job N. Ending the turn is the CORRECT move — the job's completion wakes you back up,
   and no progress is lost. Do not keep thinking to fill the time.
-- PERMISSION GATE: a non-whitelisted command is NOT hard-blocked — it prompts the USER
-  for approval (a dialog with the full command). The prompt auto-rejects after 30s
-  without a response, and any explicit "No" rejects, so if the user is away or declines
-  the call comes back BLOCKED. Treat a gate block as "not approved": do not re-issue the
-  same command to re-trigger the prompt — take the alternative the block reason names.
+- PERMISSION GATE (plugin "permission-gate"; settings in /settings → Plugins →
+  permission-gate): non-whitelisted bash commands are gated by the `approvalTimeout`
+  setting — "30s" prompts the USER (a dialog with the full command; auto-rejects after
+  30s or on "No"), "immediate" blocks the call at once with NO prompt, "forever"
+  prompts with no timeout. The mode is re-read per call and can change between calls;
+  the block reason states which fired (immediate: "blocked without prompting").
+  Treat a gate block as "not approved": never wait for a dialog and never re-issue the
+  same command to re-trigger a prompt — take the alternative the block reason names.
 - BLOCKED by the permission gate: command substitution `$(...)`/backticks, `rm`/`mv`/`cp`,
   `sudo`, `apt`/`brew`, `source`/`export`, interactive editors, and redirects to anything but
   a scratch path (`> /tmp/...` is fine). Delete a file with a hashline `REM` op, rename with

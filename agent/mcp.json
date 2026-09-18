@@ -1,0 +1,9 @@
+{
+  "mcpServers": {},
+  "disabledServers": [
+    "coralogix-server",
+    "livecalls",
+    "livecalls-remote",
+    "context-mode:context-mode"
+  ]
+}
